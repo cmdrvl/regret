@@ -118,14 +118,16 @@ impl Store {
                 .is_some();
 
             let row_count = if exists {
-                self.conn.query_row(
-                    &format!("SELECT COUNT(*) FROM {}", table),
-                    [],
-                    |row: &rusqlite::Row| {
-                        let count: i64 = row.get(0)?;
-                        Ok(count)
-                    },
-                ).ok()
+                self.conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {}", table),
+                        [],
+                        |row: &rusqlite::Row| {
+                            let count: i64 = row.get(0)?;
+                            Ok(count)
+                        },
+                    )
+                    .ok()
             } else {
                 None
             };
