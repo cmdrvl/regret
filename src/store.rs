@@ -27,6 +27,7 @@ pub(crate) struct DiagnosticResults {
     pub(crate) coverage_since_utc: Option<String>,
     pub(crate) coverage_since_oid: Option<String>,
     pub(crate) coverage_valid: Option<bool>,
+    pub(crate) is_shallow: Option<bool>,
     pub(crate) integrity_check: Option<String>,
 }
 
@@ -279,6 +280,7 @@ impl Store {
             .optional()?;
 
         results.coverage_valid = self.get_meta_bool("coverage_valid")?;
+        results.is_shallow = self.get_meta_bool("is_shallow")?;
 
         // Deep integrity check if requested
         if deep {

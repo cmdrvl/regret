@@ -11,6 +11,7 @@ mod path_validation;
 mod scan;
 mod scan_lock;
 mod selected_branch;
+mod shallow;
 mod store;
 mod time_window;
 
@@ -411,6 +412,20 @@ fn print_diagnostic_results(results: &store::DiagnosticResults, config: &Config)
     match &results.coverage_since_utc {
         Some(coverage) => println!("  coverage_since_utc: {}", coverage),
         None => println!("  coverage_since_utc: not set"),
+    }
+    match results.coverage_valid {
+        Some(valid) => println!("  coverage_valid: {}", valid),
+        None => println!("  coverage_valid: not set"),
+    }
+    match results.is_shallow {
+        Some(true) => println!("  is_shallow: true (coverage bounded)"),
+        Some(false) => println!("  is_shallow: false"),
+        None => println!("  is_shallow: not set"),
+    }
+
+    match &results.coverage_since_oid {
+        Some(coverage) => println!("  coverage_since_oid: {}", coverage),
+        None => println!("  coverage_since_oid: not set"),
     }
 
     // Deep checks with --deep flag
