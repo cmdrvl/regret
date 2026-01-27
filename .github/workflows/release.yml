@@ -104,6 +104,14 @@ jobs:
             echo "strip not available; skipping"
           fi
 
+      - name: Install cross-strip toolchain
+        if: matrix.strip == 'linux-cross'
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+
+      - name: Strip binary (linux cross)
+        if: matrix.strip == 'linux-cross'
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/${{ matrix.bin }}
+
       - name: Package archive (unix)
         if: matrix.archive_ext == 'tar.gz'
         shell: bash
@@ -131,13 +139,6 @@ jobs:
           path: regret-${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_ext }}
           if-no-files-found: error
           retention-days: 7
-      - name: Install cross-strip toolchain
-        if: matrix.strip == 'linux-cross'
-        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
-
-      - name: Strip binary (linux cross)
-        if: matrix.strip == 'linux-cross'
-        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/${{ matrix.bin }}
 
   release:
     name: Release artifacts

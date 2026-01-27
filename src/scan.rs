@@ -9,6 +9,8 @@ const SUBJECT_TRUNCATE_LEN: usize = 80;
 const META_LAST_SCANNED_GRAPH_TIP: &str = "last_scanned_graph_tip";
 const META_CACHE_VALID: &str = "cache_valid";
 const META_COVERAGE_VALID: &str = "coverage_valid";
+const META_COVERAGE_SINCE_UTC: &str = "coverage_since_utc";
+const META_COVERAGE_SINCE_OID: &str = "coverage_since_oid";
 
 pub(crate) struct ScanSummary {
     pub(crate) new_commits: usize,
@@ -34,8 +36,9 @@ pub(crate) fn incremental_scan(
     revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
     revwalk.push(current_oid)?;
 
-    if let Some(last_tip) = store.get_meta_value(META_LAST_SCANNED_GRAPH_TIP)? {
-        let last_oid = Oid::from_str(&last_tip)
+    let last_tip = store.get_meta_value(META_LAST_SCANNED_GRAPH_TIP)?;
+    if let Some(last_tip) = last_tip.as_deref() {
+        let last_oid = Oid::from_str(last_tip)
             .map_err(|_| anyhow!("error: invalid last_scanned_graph_tip {}", last_tip))?;
         revwalk.hide(last_oid).ok();
     }
@@ -63,6 +66,13 @@ pub(crate) fn incremental_scan(
     fast_path::set_last_scanned_oids(store, &current_oid.to_string(), &current_oid.to_string())?;
     store.set_meta_bool(META_CACHE_VALID, true)?;
     store.set_meta_bool(META_COVERAGE_VALID, true)?;
+
+    if store.get_meta_value(META_COVERAGE_SINCE_UTC)?.is_none() || last_tip.is_none() {
+        if let Some((sha, time_utc)) = store.get_oldest_commit()? {
+            store.set_meta_value(META_COVERAGE_SINCE_OID, &sha)?;
+            store.set_meta_value(META_COVERAGE_SINCE_UTC, &time_utc)?;
+        }
+    }
 
     Ok(ScanSummary {
         new_commits: rows.len(),
@@ -130,6 +140,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let base = real_path(temp.path());
         init_repo(&base);
+        let root_oid = run_git(&base, &["rev-list", "--max-parents=0", "HEAD"]);
 
         let cache_dir = base.join(".regret");
         let mut store = Store::open(&cache_dir).unwrap();
@@ -137,9 +148,15 @@ mod tests {
 
         let first = incremental_scan(&base, &mut store, &selected).unwrap();
         assert!(first.new_commits > 0);
+        let coverage_oid = store.get_meta_value("coverage_since_oid").unwrap();
+        assert_eq!(coverage_oid.as_deref(), Some(root_oid.as_str()));
+        let coverage_utc = store.get_meta_value("coverage_since_utc").unwrap();
+        assert!(coverage_utc.is_some());
 
         let second = incremental_scan(&base, &mut store, &selected).unwrap();
         assert_eq!(second.new_commits, 0);
+        let coverage_oid_again = store.get_meta_value("coverage_since_oid").unwrap();
+        assert_eq!(coverage_oid_again.as_deref(), Some(root_oid.as_str()));
 
         std::fs::write(base.join("CHANGELOG.md"), "change").unwrap();
         run_git(&base, &["add", "."]);
@@ -147,5 +164,7 @@ mod tests {
 
         let third = incremental_scan(&base, &mut store, &selected).unwrap();
         assert_eq!(third.new_commits, 1);
+        let coverage_oid_after = store.get_meta_value("coverage_since_oid").unwrap();
+        assert_eq!(coverage_oid_after.as_deref(), Some(root_oid.as_str()));
     }
 }

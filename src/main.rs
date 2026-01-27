@@ -12,6 +12,7 @@ mod scan;
 mod scan_lock;
 mod selected_branch;
 mod store;
+mod time_window;
 
 /// Custom duration type for parsing time spans
 #[derive(Debug, Clone, PartialEq)]
@@ -619,9 +620,15 @@ fn run(config: Config) -> Result<()> {
         let repo_root = std::env::current_dir()?;
         let selected = selected_branch::ensure_selected_branch(&repo_root, &store)?;
         fast_path::ensure_meta_defaults(&store, &selected)?;
+        let until_info = time_window::compute_until(&config.until, &repo_root, &selected)?;
 
         if config.debug {
             eprintln!("Debug: selected_branch = {}", selected);
+            eprintln!(
+                "Debug: window_until_utc = {} ({:?})",
+                until_info.until.to_rfc3339(),
+                until_info.source
+            );
         }
 
         match mode {

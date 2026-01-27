@@ -25,6 +25,8 @@ pub(crate) struct DiagnosticResults {
     pub(crate) indexes: HashMap<String, bool>,
     pub(crate) last_scanned_ref_oid: Option<String>,
     pub(crate) coverage_since_utc: Option<String>,
+    pub(crate) coverage_since_oid: Option<String>,
+    pub(crate) coverage_valid: Option<bool>,
     pub(crate) integrity_check: Option<String>,
 }
 
@@ -134,6 +136,17 @@ impl Store {
 
         tx.commit()?;
         Ok(())
+    }
+
+    pub(crate) fn get_oldest_commit(&self) -> Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT sha, time_utc FROM \"commit\" ORDER BY time_utc ASC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("error: unable to read oldest commit")
     }
 
     /// Run database diagnostics and return formatted results
@@ -252,6 +265,20 @@ impl Store {
                 },
             )
             .optional()?;
+
+        results.coverage_since_oid = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='coverage_since_oid'",
+                [],
+                |row: &rusqlite::Row| {
+                    let coverage: String = row.get(0)?;
+                    Ok(coverage)
+                },
+            )
+            .optional()?;
+
+        results.coverage_valid = self.get_meta_bool("coverage_valid")?;
 
         // Deep integrity check if requested
         if deep {

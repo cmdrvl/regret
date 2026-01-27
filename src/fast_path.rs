@@ -52,6 +52,38 @@ pub(crate) fn should_skip_scan(repo_root: &Path, store: &Store, ref_name: &str) 
         .unwrap_or(false))
 }
 
+#[allow(dead_code)]
+pub(crate) fn detect_rewrite(
+    repo_root: &Path,
+    ref_name: &str,
+    last_scanned_ref_oid: &str,
+) -> Result<bool> {
+    let repo = Repository::discover(repo_root).with_context(|| {
+        format!(
+            "error: unable to open git repository {}",
+            repo_root.display()
+        )
+    })?;
+    let current_oid = resolve_ref_oid(&repo, ref_name)?
+        .ok_or_else(|| anyhow!("error: unable to resolve ref {}", ref_name))?;
+    let last_oid = Oid::from_str(last_scanned_ref_oid).map_err(|_| {
+        anyhow!(
+            "error: invalid last_scanned_ref_oid {}",
+            last_scanned_ref_oid
+        )
+    })?;
+
+    if current_oid == last_oid {
+        return Ok(false);
+    }
+
+    let descendant = repo
+        .graph_descendant_of(current_oid, last_oid)
+        .map_err(|e| anyhow!("error: unable to check graph ancestry: {}", e))?;
+
+    Ok(!descendant)
+}
+
 pub(crate) fn resolve_ref_oid(repo: &Repository, ref_name: &str) -> Result<Option<Oid>> {
     if ref_name == "HEAD" {
         let head = repo.head().context("error: unable to resolve HEAD")?;
@@ -181,5 +213,51 @@ mod tests {
 
         let skip = should_skip_scan(&base, &store, &selected).unwrap();
         assert!(!skip);
+    }
+
+    #[test]
+    fn detect_rewrite_returns_false_when_head_descends() {
+        let temp = tempdir().unwrap();
+        let base = real_path(temp.path());
+        init_repo(&base);
+
+        std::fs::write(base.join("CHANGELOG.md"), "change").unwrap();
+        run_git(&base, &["add", "."]);
+        run_git(&base, &["commit", "-m", "change"]);
+
+        let last = run_git(&base, &["rev-parse", "HEAD"]);
+        let rewrite = detect_rewrite(&base, "refs/heads/main", &last).unwrap();
+        assert!(!rewrite);
+    }
+
+    #[test]
+    fn detect_rewrite_returns_true_on_rewrite() {
+        let temp = tempdir().unwrap();
+        let base = real_path(temp.path());
+        init_repo(&base);
+
+        std::fs::write(base.join("CHANGELOG.md"), "change").unwrap();
+        run_git(&base, &["add", "."]);
+        run_git(&base, &["commit", "-m", "change"]);
+        let last_scanned = run_git(&base, &["rev-parse", "HEAD"]);
+
+        let original = run_git(&base, &["rev-parse", "HEAD~1"]);
+        run_git(&base, &["reset", "--hard", &original]);
+        std::fs::write(base.join("REWRITE.md"), "rewrite").unwrap();
+        run_git(&base, &["add", "."]);
+        run_git(&base, &["commit", "-m", "rewrite"]);
+
+        let rewrite = detect_rewrite(&base, "refs/heads/main", &last_scanned).unwrap();
+        assert!(rewrite);
+    }
+
+    #[test]
+    fn detect_rewrite_errors_on_invalid_oid() {
+        let temp = tempdir().unwrap();
+        let base = real_path(temp.path());
+        init_repo(&base);
+
+        let err = detect_rewrite(&base, "refs/heads/main", "not-a-sha");
+        assert!(err.is_err());
     }
 }

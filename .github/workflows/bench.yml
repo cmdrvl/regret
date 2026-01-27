@@ -31,7 +31,7 @@ jobs:
           path: |
             target/criterion
             bench-baseline
-          key: bench-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: bench-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             bench-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
 

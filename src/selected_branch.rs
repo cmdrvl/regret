@@ -35,7 +35,11 @@ pub(crate) fn detect_default_branch(repo_root: &Path) -> Result<String> {
         return Ok(head);
     }
 
-    Ok("HEAD".to_string())
+    if let Some(branch) = head_branch_name(repo_root)? {
+        return Ok(format!("refs/heads/{}", branch));
+    }
+
+    Err(anyhow!("error: unable to resolve selected branch"))
 }
 
 fn ref_exists(repo_root: &Path, reference: &str) -> Result<bool> {
@@ -65,6 +69,29 @@ fn symbolic_ref(repo_root: &Path, reference: &str) -> Result<Option<String>> {
         .to_string();
 
     if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn head_branch_name(repo_root: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| "error: unable to resolve HEAD branch")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let value = String::from_utf8(output.stdout)
+        .map_err(|_| anyhow!("error: invalid utf8 in rev-parse output"))?
+        .trim()
+        .to_string();
+
+    if value.is_empty() || value == "HEAD" {
         Ok(None)
     } else {
         Ok(Some(value))
