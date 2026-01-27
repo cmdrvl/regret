@@ -54,6 +54,17 @@ fn create_dir_secure(path: &Path) -> Result<()> {
     for component in path.components() {
         cursor.push(component);
         if cursor.exists() {
+            let metadata = fs::symlink_metadata(&cursor)
+                .with_context(|| format!("error: unable to stat {}", cursor.display()))?;
+            if metadata.file_type().is_symlink() {
+                bail!(SYMLINK_ERROR);
+            }
+            if !metadata.is_dir() {
+                bail!(
+                    "error: cache path component is not a directory: {}",
+                    cursor.display()
+                );
+            }
             continue;
         }
 
@@ -75,12 +86,18 @@ fn create_dir_secure(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    fn real_path(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
 
     #[test]
     fn validate_cache_path_allows_regular_path() {
         let temp = tempdir().unwrap();
-        let cache_dir = temp.path().join(".regret");
+        let base = real_path(temp.path());
+        let cache_dir = base.join(".regret");
         assert!(validate_cache_path(&cache_dir).is_ok());
     }
 
@@ -90,9 +107,10 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp = tempdir().unwrap();
-        let target = temp.path().join("target");
+        let base = real_path(temp.path());
+        let target = base.join("target");
         fs::create_dir_all(&target).unwrap();
-        let link = temp.path().join(".regret");
+        let link = base.join(".regret");
         symlink(&target, &link).unwrap();
 
         let err = validate_cache_path(&link).unwrap_err();
@@ -105,9 +123,10 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp = tempdir().unwrap();
-        let real = temp.path().join("real");
+        let base = real_path(temp.path());
+        let real = base.join("real");
         fs::create_dir_all(&real).unwrap();
-        let link = temp.path().join("link");
+        let link = base.join("link");
         symlink(&real, &link).unwrap();
         let cache_dir = link.join(".regret");
 
@@ -121,7 +140,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempdir().unwrap();
-        let cache_dir = temp.path().join(".regret");
+        let base = real_path(temp.path());
+        let cache_dir = base.join(".regret");
         ensure_cache_dir(&cache_dir).unwrap();
 
         let dir_mode = fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;

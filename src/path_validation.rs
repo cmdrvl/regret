@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 
 /// Maximum allowed path length before truncation
 #[allow(dead_code)]
@@ -8,6 +9,10 @@ const MAX_PATH_LENGTH: usize = 4096;
 #[allow(dead_code)]
 const TRUNCATED_MARKER: &[u8] = b"<TRUNCATED>";
 
+/// Maximum number of cached paths to retain
+#[allow(dead_code)]
+const PATH_CACHE_CAPACITY: usize = 8192;
+
 /// File ID type for caching validated paths
 #[allow(dead_code)]
 pub type FileId = u64;
@@ -15,15 +20,17 @@ pub type FileId = u64;
 /// LRU cache for validated path bytes to file ID mapping
 #[allow(dead_code)]
 pub struct PathCache {
-    cache: HashMap<Vec<u8>, FileId>,
+    cache: LruCache<Vec<u8>, FileId>,
     next_id: FileId,
 }
 
 impl PathCache {
     #[allow(dead_code)]
     pub fn new() -> Self {
+        let capacity =
+            NonZeroUsize::new(PATH_CACHE_CAPACITY).expect("PATH_CACHE_CAPACITY must be non-zero");
         Self {
-            cache: HashMap::new(),
+            cache: LruCache::new(capacity),
             next_id: 1,
         }
     }
@@ -36,7 +43,7 @@ impl PathCache {
         } else {
             let id = self.next_id;
             self.next_id += 1;
-            self.cache.insert(path_bytes, id);
+            self.cache.put(path_bytes, id);
             id
         }
     }

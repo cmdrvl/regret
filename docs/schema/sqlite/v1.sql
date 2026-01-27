@@ -10,7 +10,7 @@ CREATE TABLE file (
   path TEXT UNIQUE NOT NULL CHECK(length(path) <= 4096)
 );
 
-CREATE TABLE commit (
+CREATE TABLE "commit" (
   sha TEXT PRIMARY KEY CHECK(length(sha) == 40),
   time_utc TEXT NOT NULL,
   subject TEXT,

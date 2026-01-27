@@ -118,9 +118,10 @@ impl Store {
                 .is_some();
 
             let row_count = if exists {
+                let table_sql = format!("\"{}\"", table);
                 self.conn
                     .query_row(
-                        &format!("SELECT COUNT(*) FROM {}", table),
+                        &format!("SELECT COUNT(*) FROM {}", table_sql),
                         [],
                         |row: &rusqlite::Row| {
                             let count: i64 = row.get(0)?;
@@ -210,6 +211,12 @@ fn ensure_db_file(path: &Path) -> Result<()> {
         if metadata.file_type().is_symlink() {
             bail!("error: cache db is a symlink; refusing to write");
         }
+        if !metadata.is_file() {
+            bail!(
+                "error: cache db path is not a regular file: {}",
+                path.display()
+            );
+        }
         return Ok(());
     }
 
@@ -293,12 +300,18 @@ fn set_schema_version(conn: &Connection, version: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    fn real_path(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
 
     #[test]
     fn store_creates_db_and_schema() {
         let temp = tempdir().unwrap();
-        let cache_dir = temp.path().join(".regret");
+        let base = real_path(temp.path());
+        let cache_dir = base.join(".regret");
         let store = Store::open(&cache_dir).unwrap();
 
         assert!(store.path().exists());
@@ -317,7 +330,8 @@ mod tests {
     #[test]
     fn store_applies_pragmas() {
         let temp = tempdir().unwrap();
-        let cache_dir = temp.path().join(".regret");
+        let base = real_path(temp.path());
+        let cache_dir = base.join(".regret");
         let store = Store::open(&cache_dir).unwrap();
 
         let journal_mode: String = store

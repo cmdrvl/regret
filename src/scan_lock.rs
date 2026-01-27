@@ -1,5 +1,6 @@
+use crate::cache_path;
 use anyhow::{anyhow, Context, Result};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// Exclusive advisory lock for scan operations
@@ -25,33 +26,21 @@ impl ScanLock {
     pub fn try_acquire(cache_dir: &Path) -> Result<Self> {
         let lock_path = cache_dir.join("scan.lock");
 
-        // Ensure cache directory exists
-        if !cache_dir.exists() {
-            return Err(anyhow!(
-                "error: cache directory does not exist: {}",
-                cache_dir.display()
-            ));
-        }
+        // Ensure cache directory exists and is safe
+        cache_path::ensure_cache_dir(cache_dir)?;
 
-        // Open or create lock file
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| {
-                format!(
-                    "error: unable to open scan lock file {}",
-                    lock_path.display()
-                )
-            })?;
+        // Open or create lock file safely
+        let file = cache_path::create_file_secure(&lock_path).with_context(|| {
+            format!(
+                "error: unable to open scan lock file {}",
+                lock_path.display()
+            )
+        })?;
 
         // Try to acquire exclusive lock (non-blocking)
-        if let Err(e) = Self::try_lock_file(&file) {
+        if Self::try_lock_file(&file).is_err() {
             return Err(anyhow!(
-                "error: another scan is in progress (scan.lock is held): {}",
-                e
+                "error: another scan is in progress (scan.lock is held)"
             ));
         }
 
@@ -126,14 +115,20 @@ impl Drop for ScanLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::path::{Path, PathBuf};
+    use std::sync::{mpsc, Arc};
     use std::thread;
     use tempfile::tempdir;
+
+    fn real_path(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
 
     #[test]
     fn test_single_process_acquires_lock() {
         let temp = tempdir().unwrap();
-        let cache_dir = temp.path().join(".regret");
+        let base = real_path(temp.path());
+        let cache_dir = base.join(".regret");
         std::fs::create_dir_all(&cache_dir).unwrap();
 
         let lock = ScanLock::try_acquire(&cache_dir);
@@ -146,7 +141,8 @@ mod tests {
     #[test]
     fn test_second_process_fails_with_clear_error() {
         let temp = tempdir().unwrap();
-        let cache_dir = temp.path().join(".regret");
+        let base = real_path(temp.path());
+        let cache_dir = base.join(".regret");
         std::fs::create_dir_all(&cache_dir).unwrap();
 
         // First lock succeeds
@@ -172,7 +168,8 @@ mod tests {
     #[test]
     fn test_lock_released_after_scope_exit() {
         let temp = tempdir().unwrap();
-        let cache_dir = temp.path().join(".regret");
+        let base = real_path(temp.path());
+        let cache_dir = base.join(".regret");
         std::fs::create_dir_all(&cache_dir).unwrap();
 
         // Acquire and release lock in scope
@@ -192,43 +189,40 @@ mod tests {
     #[test]
     fn test_nonexistent_cache_dir() {
         let temp = tempdir().unwrap();
-        let nonexistent_dir = temp.path().join("does_not_exist");
+        let base = real_path(temp.path());
+        let nonexistent_dir = base.join("does_not_exist");
 
         let result = ScanLock::try_acquire(&nonexistent_dir);
-        assert!(result.is_err(), "Should fail for nonexistent directory");
-
-        let error_msg = format!("{}", result.unwrap_err());
-        assert!(
-            error_msg.contains("cache directory does not exist"),
-            "Error should mention missing directory: {}",
-            error_msg
-        );
+        assert!(result.is_ok(), "Should create cache directory if missing");
     }
 
     #[test]
     fn test_concurrent_lock_attempts() {
         let temp = tempdir().unwrap();
-        let cache_dir = Arc::new(temp.path().join(".regret"));
+        let base = real_path(temp.path());
+        let cache_dir = Arc::new(base.join(".regret"));
         std::fs::create_dir_all(cache_dir.as_ref()).unwrap();
 
         let cache_dir_clone = cache_dir.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
         let handle = thread::spawn(move || {
             let _lock = ScanLock::try_acquire(&cache_dir_clone).unwrap();
-            // Hold lock for a short time
-            thread::sleep(std::time::Duration::from_millis(100));
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
         });
 
-        // Give first thread time to acquire lock
-        thread::sleep(std::time::Duration::from_millis(10));
+        ready_rx.recv().unwrap();
 
         // This should fail while first thread holds lock
         let lock2_result = ScanLock::try_acquire(&cache_dir);
         assert!(lock2_result.is_err(), "Concurrent lock should fail");
 
+        release_tx.send(()).unwrap();
         handle.join().unwrap();
 
         // After first thread releases lock, we should be able to acquire it
-        thread::sleep(std::time::Duration::from_millis(50));
         let lock3 = ScanLock::try_acquire(&cache_dir);
         assert!(lock3.is_ok(), "Should acquire lock after release");
     }
