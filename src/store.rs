@@ -1,5 +1,6 @@
 use crate::cache_path;
 use anyhow::{anyhow, bail, Context, Result};
+use rusqlite::params;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::fs;
@@ -32,6 +33,14 @@ pub(crate) struct Store {
     conn: Connection,
     #[allow(dead_code)]
     path: PathBuf,
+}
+
+pub(crate) struct CommitRow {
+    pub(crate) sha: String,
+    pub(crate) time_utc: String,
+    pub(crate) subject: Option<String>,
+    pub(crate) pr_number: Option<i64>,
+    pub(crate) pr_source: Option<String>,
 }
 
 impl Store {
@@ -97,6 +106,34 @@ impl Store {
 
     pub(crate) fn set_meta_bool(&self, key: &str, value: bool) -> Result<()> {
         self.set_meta(key, if value { "true" } else { "false" })
+    }
+
+    pub(crate) fn upsert_commits(&mut self, commits: &[CommitRow]) -> Result<()> {
+        if commits.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO \"commit\" \
+                (sha, time_utc, subject, pr_number, pr_source, patch_id, patch_id_rev, files_hash) \
+                VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)",
+            )?;
+
+            for commit in commits {
+                stmt.execute(params![
+                    commit.sha,
+                    commit.time_utc,
+                    commit.subject,
+                    commit.pr_number,
+                    commit.pr_source
+                ])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 
     /// Run database diagnostics and return formatted results

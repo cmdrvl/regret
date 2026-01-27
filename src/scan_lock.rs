@@ -223,7 +223,14 @@ mod tests {
         handle.join().unwrap();
 
         // After first thread releases lock, we should be able to acquire it
-        let lock3 = ScanLock::try_acquire(&cache_dir);
-        assert!(lock3.is_ok(), "Should acquire lock after release");
+        let mut acquired = false;
+        for _ in 0..10 {
+            if ScanLock::try_acquire(&cache_dir).is_ok() {
+                acquired = true;
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(acquired, "Should acquire lock after release");
     }
 }

@@ -8,6 +8,7 @@ use std::time::Duration as StdDuration;
 mod cache_path;
 mod fast_path;
 mod path_validation;
+mod scan;
 mod scan_lock;
 mod selected_branch;
 mod store;
@@ -614,7 +615,7 @@ fn run(config: Config) -> Result<()> {
     };
 
     if writes_cache {
-        let store = store::Store::open(std::path::Path::new(".regret"))?;
+        let mut store = store::Store::open(std::path::Path::new(".regret"))?;
         let repo_root = std::env::current_dir()?;
         let selected = selected_branch::ensure_selected_branch(&repo_root, &store)?;
         fast_path::ensure_meta_defaults(&store, &selected)?;
@@ -623,11 +624,28 @@ fn run(config: Config) -> Result<()> {
             eprintln!("Debug: selected_branch = {}", selected);
         }
 
-        if matches!(mode, Mode::Default) && !config.no_scan {
-            let skip_scan = fast_path::should_skip_scan(&repo_root, &store, &selected)?;
-            if config.debug {
-                eprintln!("Debug: fast_path_skip_scan = {}", skip_scan);
+        match mode {
+            Mode::Scan => {
+                let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
+                if config.debug {
+                    eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+                } else {
+                    println!("Scanned {} commits", summary.new_commits);
+                }
             }
+            Mode::Default if !config.no_scan => {
+                let skip_scan = fast_path::should_skip_scan(&repo_root, &store, &selected)?;
+                if config.debug {
+                    eprintln!("Debug: fast_path_skip_scan = {}", skip_scan);
+                }
+                if !skip_scan {
+                    let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
+                    if config.debug {
+                        eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

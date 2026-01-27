@@ -74,7 +74,12 @@ fn symbolic_ref(repo_root: &Path, reference: &str) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    fn real_path(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
 
     fn run_git(repo: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -98,15 +103,13 @@ mod tests {
     #[test]
     fn detect_prefers_origin_head() {
         let temp = tempdir().unwrap();
-        init_repo(temp.path());
+        let base = real_path(temp.path());
+        init_repo(&base);
 
-        let sha = run_git(temp.path(), &["rev-parse", "HEAD"]);
+        let sha = run_git(&base, &["rev-parse", "HEAD"]);
+        run_git(&base, &["update-ref", "refs/remotes/origin/main", &sha]);
         run_git(
-            temp.path(),
-            &["update-ref", "refs/remotes/origin/main", &sha],
-        );
-        run_git(
-            temp.path(),
+            &base,
             &[
                 "symbolic-ref",
                 "refs/remotes/origin/HEAD",
@@ -114,59 +117,60 @@ mod tests {
             ],
         );
 
-        let branch = detect_default_branch(temp.path()).unwrap();
+        let branch = detect_default_branch(&base).unwrap();
         assert_eq!(branch, "refs/remotes/origin/main");
     }
 
     #[test]
     fn detect_falls_back_to_main() {
         let temp = tempdir().unwrap();
-        init_repo(temp.path());
-        run_git(temp.path(), &["branch", "-m", "main"]);
+        let base = real_path(temp.path());
+        init_repo(&base);
+        run_git(&base, &["branch", "-m", "main"]);
 
-        let branch = detect_default_branch(temp.path()).unwrap();
+        let branch = detect_default_branch(&base).unwrap();
         assert_eq!(branch, "refs/heads/main");
     }
 
     #[test]
     fn detect_falls_back_to_master() {
         let temp = tempdir().unwrap();
-        init_repo(temp.path());
-        run_git(temp.path(), &["branch", "-m", "master"]);
+        let base = real_path(temp.path());
+        init_repo(&base);
+        run_git(&base, &["branch", "-m", "master"]);
 
-        let branch = detect_default_branch(temp.path()).unwrap();
+        let branch = detect_default_branch(&base).unwrap();
         assert_eq!(branch, "refs/heads/master");
     }
 
     #[test]
     fn detect_uses_current_head_branch() {
         let temp = tempdir().unwrap();
-        init_repo(temp.path());
-        run_git(temp.path(), &["branch", "-m", "dev"]);
+        let base = real_path(temp.path());
+        init_repo(&base);
+        run_git(&base, &["branch", "-m", "dev"]);
 
-        let branch = detect_default_branch(temp.path()).unwrap();
+        let branch = detect_default_branch(&base).unwrap();
         assert_eq!(branch, "refs/heads/dev");
     }
 
     #[test]
     fn ensure_selected_branch_persists() {
         let temp = tempdir().unwrap();
-        init_repo(temp.path());
-        run_git(temp.path(), &["branch", "-m", "main"]);
+        let base = real_path(temp.path());
+        init_repo(&base);
+        run_git(&base, &["branch", "-m", "main"]);
 
-        let cache_dir = temp.path().join(".regret");
+        let cache_dir = base.join(".regret");
         let store = Store::open(&cache_dir).unwrap();
 
-        let first = ensure_selected_branch(temp.path(), &store).unwrap();
+        let first = ensure_selected_branch(&base, &store).unwrap();
         assert_eq!(first, "refs/heads/main");
 
-        let sha = run_git(temp.path(), &["rev-parse", "HEAD"]);
+        let sha = run_git(&base, &["rev-parse", "HEAD"]);
+        run_git(&base, &["update-ref", "refs/remotes/origin/main", &sha]);
         run_git(
-            temp.path(),
-            &["update-ref", "refs/remotes/origin/main", &sha],
-        );
-        run_git(
-            temp.path(),
+            &base,
             &[
                 "symbolic-ref",
                 "refs/remotes/origin/HEAD",
@@ -174,7 +178,7 @@ mod tests {
             ],
         );
 
-        let second = ensure_selected_branch(temp.path(), &store).unwrap();
+        let second = ensure_selected_branch(&base, &store).unwrap();
         assert_eq!(second, "refs/heads/main");
     }
 }
