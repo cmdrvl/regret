@@ -263,4 +263,42 @@ cass search "regret linked-fix trailer" --robot --limit 5
 cass search "sqlite wal lock file" --robot --limit 5
 ```
 
+### APR (Automated Plan Reviser Pro) — Agent Reference
+
+Iterative spec refinement via GPT Pro Extended Reasoning. Multi-round AI review
+with structured outputs for Claude Code integration.
+
+#### Commands
+
+```bash
+# Workflow
+apr setup                      # Interactive wizard (first time)
+apr run <N>                    # Run revision round N
+apr run <N> -i                 # Include implementation doc
+apr run <N> -d                 # Dry-run preview
+apr show <N>                   # View round output
+
+# Analysis
+apr diff <N> [M]               # Compare rounds (N vs M, or N vs N-1)
+apr stats                      # Convergence analytics + remaining rounds estimate
+apr integrate <N> -c           # Claude Code prompt → clipboard (KEY COMMAND)
+
+# Management
+apr status [--hours 24]        # Oracle session status
+apr attach <slug>              # Reattach to session
+apr list                       # List workflows
+apr history                    # Round history
+apr backfill                   # Generate metrics from existing rounds
+apr update                     # Self-update
+```
+
+#### Robot Mode (JSON API)
+
+Robot mode defaults to JSON, and can also emit TOON (token-optimized) when
+`tru` (toon_rust) is installed:
+
+```bash
+apr robot status --format toon
+```
+
 ---
