@@ -1,0 +1,266 @@
+name: Release Build Matrix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths: ["Cargo.toml"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-artifacts:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_ext: tar.gz
+            bin: regret
+            strip: linux
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_ext: tar.gz
+            bin: regret
+            strip: linux-cross
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive_ext: tar.gz
+            bin: regret
+            strip: macos
+            use_cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive_ext: tar.gz
+            bin: regret
+            strip: macos
+            use_cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_ext: zip
+            bin: regret.exe
+            strip: none
+            use_cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          version=$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('Cargo.toml').read_text())
+          print(f"v{data['package']['version']}")
+          PY
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cargo)
+        if: matrix.use_cross == false
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip binary (linux)
+        if: matrix.strip == 'linux'
+        run: |
+          if command -v strip >/dev/null; then
+            strip target/${{ matrix.target }}/release/${{ matrix.bin }}
+          else
+            echo "strip not available; skipping"
+          fi
+
+      - name: Strip binary (macos)
+        if: matrix.strip == 'macos'
+        run: |
+          if command -v strip >/dev/null; then
+            strip -x target/${{ matrix.target }}/release/${{ matrix.bin }}
+          else
+            echo "strip not available; skipping"
+          fi
+
+      - name: Package archive (unix)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          dist_dir="dist/${{ matrix.target }}"
+          mkdir -p "$dist_dir"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$dist_dir/regret"
+          cp LICENSE README.md "$dist_dir/"
+          tar -czf "regret-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" -C "$dist_dir" .
+
+      - name: Package archive (windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $dist = "dist/${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$dist\\regret.exe"
+          Copy-Item LICENSE,README.md $dist
+          Compress-Archive -Path "$dist\\*" -DestinationPath "regret-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip" -Force
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: regret-${{ steps.version.outputs.version }}-${{ matrix.target }}
+          path: regret-${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Install cross-strip toolchain
+        if: matrix.strip == 'linux-cross'
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+
+      - name: Strip binary (linux cross)
+        if: matrix.strip == 'linux-cross'
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/${{ matrix.bin }}
+
+  release:
+    name: Release artifacts
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('Cargo.toml').read_text())
+          print(f"v{data['package']['version']}")
+          PY
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag if missing
+        run: |
+          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag exists"
+          else
+            git tag -a "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.version }}"
+            git push origin "${{ steps.version.outputs.version }}"
+          fi
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          find dist -maxdepth 1 -type f \( -name "regret-*.tar.gz" -o -name "regret-*.zip" \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > dist/SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS
+        run: |
+          cosign sign-blob --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.pem \
+            dist/SHA256SUMS
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@cargo-cyclonedx
+
+      - name: Generate SBOM
+        run: cargo cyclonedx --format json --output-file dist/sbom.cdx.json
+
+      - name: Generate provenance
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import pathlib
+
+          dist = pathlib.Path("dist")
+          sums = (dist / "SHA256SUMS").read_text().strip().splitlines()
+          subjects = []
+          for line in sums:
+            digest, name = line.split(maxsplit=1)
+            subjects.append({
+              "name": name,
+              "digest": {"sha256": digest},
+            })
+
+          now = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+          statement = {
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": subjects,
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicate": {
+              "buildDefinition": {
+                "buildType": "https://github.com/actions/runner",
+                "externalParameters": {
+                  "workflow": "release.yml",
+                  "ref": os.environ.get("GITHUB_REF"),
+                  "sha": os.environ.get("GITHUB_SHA"),
+                },
+                "internalParameters": {},
+                "resolvedDependencies": [],
+              },
+              "runDetails": {
+                "builder": {
+                  "id": f"https://github.com/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}"
+                },
+                "metadata": {
+                  "invocationId": os.environ.get("GITHUB_RUN_ID"),
+                  "startedOn": now,
+                  "finishedOn": now,
+                },
+              },
+            },
+          }
+
+          (dist / "provenance.intoto.jsonl").write_text(json.dumps(statement) + "\n")
+          PY
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          files: |
+            dist/regret-*.tar.gz
+            dist/regret-*.zip
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.pem
+            dist/provenance.intoto.jsonl
+            dist/sbom.cdx.json

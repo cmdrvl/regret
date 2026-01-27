@@ -28,3 +28,6 @@ target
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# ntm local logs/pids
+.ntm/
