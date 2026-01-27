@@ -1,0 +1,18 @@
+# Add this job to your .github/workflows/ci.yml or create a separate workflow
+
+regret-check:
+  name: Regret Analysis
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for regret analysis
+
+    - name: Install regret
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/cmdrvl/regret/main/scripts/install.sh | bash
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Run regret analysis
+      run: |
+        regret --ndjson --fail-if "regret_events >= 5 or max_score > 50"

@@ -1,0 +1,14 @@
+#!/bin/sh
+# regret commit-msg hook (advisory only)
+# Always exits 0 - never blocks commits
+
+# Check if commit message contains "Fixes" but no "Fixes-Commit:" trailer
+if grep -i "fixes" "$1" >/dev/null 2>&1; then
+    if ! grep -E "^Fixes-(Commit|SHA):" "$1" >/dev/null 2>&1; then
+        echo "hint: commit mentions 'fixes' but no Fixes-Commit: trailer found"
+        echo "hint: consider adding 'Fixes-Commit: <full_sha>' to reference the culprit"
+    fi
+fi
+
+# Always exit 0 (advisory only, never block)
+exit 0

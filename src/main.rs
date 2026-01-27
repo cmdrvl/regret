@@ -6,6 +6,7 @@ use std::process;
 use std::time::Duration as StdDuration;
 
 mod cache_path;
+mod store;
 
 /// Custom duration type for parsing time spans
 #[derive(Debug, Clone, PartialEq)]
@@ -164,7 +165,6 @@ pub struct Config {
     pub sha: Option<String>,
 }
 
-
 /// Parse command line arguments into Config
 fn parse_args() -> Result<Config> {
     let app = Command::new("regret")
@@ -266,6 +266,166 @@ fn parse_args() -> Result<Config> {
     Ok(config)
 }
 
+/// Implement --init command: create templates and snippets
+fn run_init_command() -> Result<()> {
+    use std::fs;
+    use std::path::Path;
+
+    let regret_dir = Path::new(".regret");
+
+    // Ensure .regret directory exists with safe permissions
+    cache_path::ensure_cache_dir(regret_dir)?;
+
+    // Create subdirectories
+    let agent_snippets_dir = regret_dir.join("agent-snippets");
+    let ci_dir = regret_dir.join("ci");
+    let hooks_dir = regret_dir.join("hooks");
+
+    fs::create_dir_all(&agent_snippets_dir)?;
+    fs::create_dir_all(&ci_dir)?;
+    fs::create_dir_all(&hooks_dir)?;
+
+    let mut created_files = Vec::new();
+
+    // 1. commit-template.txt
+    let commit_template_content = r#"# regret commit template
+#
+# If this commit fixes a previously delivered change, add an explicit trailer
+# referencing the *culprit* commit (full 40-hex SHA; no prefixes):
+#
+# Fixes-Commit: <full_sha>
+# Fixes-SHA: <full_sha>
+#
+# Optional (context only; never affects scoring; enables CASS/beads join):
+# Bead-Ref: <id>
+# Work-Ref: <token>
+# Session-Ref: <session_id>
+"#;
+
+    let commit_template_path = regret_dir.join("commit-template.txt");
+    fs::write(&commit_template_path, commit_template_content)?;
+    created_files.push("commit-template.txt");
+
+    // 2. ADOPTION.md
+    let adoption_content = r#"# regret adoption
+
+Enable commit template (local repo):
+
+    git config commit.template .regret/commit-template.txt
+
+Disable commit template (local repo):
+
+    git config --unset commit.template
+
+Check current setting:
+
+    git config --get commit.template
+"#;
+
+    let adoption_path = regret_dir.join("ADOPTION.md");
+    fs::write(&adoption_path, adoption_content)?;
+    created_files.push("ADOPTION.md");
+
+    // 3. agent-snippets/regret-linked-fix.md
+    let linked_fix_content = r#"# regret: linked-fix trailers (agent rule)
+
+When you make a follow-up fix for a previous commit, add a trailer referencing the culprit commit:
+
+- Add: `Fixes-Commit: <full 40-hex SHA>` in the commit message trailers/footer section.
+- Use the full SHA (no prefixes).
+- The SHA MUST be the culprit (the change being fixed), not the evidence/fix commit.
+"#;
+
+    let linked_fix_path = agent_snippets_dir.join("regret-linked-fix.md");
+    fs::write(&linked_fix_path, linked_fix_content)?;
+    created_files.push("agent-snippets/regret-linked-fix.md");
+
+    // 4. agent-snippets/regret-session-context.md
+    let session_context_content = r#"# regret: session context trailers (agent rule)
+
+Always include work tracking trailers in your commits to enable conversation-to-code traceability:
+
+- Add: `Bead-Ref: <bead_id>` if you are working on a tracked issue (e.g., `Bead-Ref: beads-42`)
+- Add: `Work-Ref: <token>` if you have a work token from your orchestrator
+- Optionally add: `Session-Ref: <session_id>` if your session ID is available
+
+These trailers enable `cass` and other tools to join commit history back to the conversation that produced it. They do not affect regret scoring—they are context only.
+"#;
+
+    let session_context_path = agent_snippets_dir.join("regret-session-context.md");
+    fs::write(&session_context_path, session_context_content)?;
+    created_files.push("agent-snippets/regret-session-context.md");
+
+    // 5. ci/github-actions-regret.yml
+    let github_actions_content = r#"# Add this job to your .github/workflows/ci.yml or create a separate workflow
+
+regret-check:
+  name: Regret Analysis
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for regret analysis
+
+    - name: Install regret
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/cmdrvl/regret/main/scripts/install.sh | bash
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Run regret analysis
+      run: |
+        regret --ndjson --fail-if "regret_events >= 5 or max_score > 50"
+"#;
+
+    let github_actions_path = ci_dir.join("github-actions-regret.yml");
+    fs::write(&github_actions_path, github_actions_content)?;
+    created_files.push("ci/github-actions-regret.yml");
+
+    // 6. hooks/commit-msg (POSIX sh, advisory only)
+    let commit_msg_hook_content = r#"#!/bin/sh
+# regret commit-msg hook (advisory only)
+# Always exits 0 - never blocks commits
+
+# Check if commit message contains "Fixes" but no "Fixes-Commit:" trailer
+if grep -i "fixes" "$1" >/dev/null 2>&1; then
+    if ! grep -E "^Fixes-(Commit|SHA):" "$1" >/dev/null 2>&1; then
+        echo "hint: commit mentions 'fixes' but no Fixes-Commit: trailer found"
+        echo "hint: consider adding 'Fixes-Commit: <full_sha>' to reference the culprit"
+    fi
+fi
+
+# Always exit 0 (advisory only, never block)
+exit 0
+"#;
+
+    let commit_msg_path = hooks_dir.join("commit-msg");
+    fs::write(&commit_msg_path, commit_msg_hook_content)?;
+
+    // Make the hook executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&commit_msg_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&commit_msg_path, perms)?;
+    }
+
+    created_files.push("hooks/commit-msg");
+
+    // Print what was created
+    println!("Created:");
+    for file in &created_files {
+        println!("  {}", file);
+    }
+
+    // Print next steps
+    println!("\nNext steps:");
+    println!("  git config commit.template .regret/commit-template.txt");
+    println!("  git config --unset commit.template");
+
+    Ok(())
+}
+
 /// Main entry point
 fn main() {
     let config = match parse_args() {
@@ -298,13 +458,13 @@ fn run(config: Config) -> Result<()> {
     };
 
     if writes_cache {
-        cache_path::ensure_cache_dir(std::path::Path::new(".regret"))?;
+        let _store = store::Store::open(std::path::Path::new(".regret"))?;
     }
 
     // Execute based on resolved mode (with precedence)
     match mode {
         Mode::Init => {
-            println!("TODO: Implement init command (install commit templates)");
+            run_init_command()?;
         }
         Mode::Doctor => {
             println!("TODO: Implement doctor command (diagnostics)");
@@ -403,12 +563,14 @@ mod tests {
         assert_eq!(resolve_mode(&config), Mode::Scan);
 
         // 4. Explain beats default (but not init/doctor/scan)
-        config = Config::default();
-        config.sha = Some("abc123".to_string());
+        let config = Config {
+            sha: Some("abc123".to_string()),
+            ..Default::default()
+        };
         assert_eq!(resolve_mode(&config), Mode::Explain("abc123".to_string()));
 
         // 5. Default when no other modes
-        config = Config::default();
+        let config = Config::default();
         assert_eq!(resolve_mode(&config), Mode::Default);
     }
 }

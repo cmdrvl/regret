@@ -1,0 +1,12 @@
+# regret commit template
+#
+# If this commit fixes a previously delivered change, add an explicit trailer
+# referencing the *culprit* commit (full 40-hex SHA; no prefixes):
+#
+# Fixes-Commit: <full_sha>
+# Fixes-SHA: <full_sha>
+#
+# Optional (context only; never affects scoring; enables CASS/beads join):
+# Bead-Ref: <id>
+# Work-Ref: <token>
+# Session-Ref: <session_id>
