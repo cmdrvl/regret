@@ -1,0 +1,49 @@
+name: Coverage
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+  pull_request:
+    branches: ["main"]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'coverage')
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Prepare artifacts directory
+        run: mkdir -p artifacts/coverage
+
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path artifacts/coverage/lcov.info --fail-under-lines 60 --fail-under-branches 50
+
+      - name: Generate coverage (json)
+        run: cargo llvm-cov --all-features --workspace --json --output-path artifacts/coverage/coverage.json --fail-under-lines 60 --fail-under-branches 50
+
+      - name: Coverage summary
+        run: |
+          echo "## Coverage Summary" >> "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov --all-features --workspace --summary-only >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-artifacts
+          path: artifacts/coverage
+          retention-days: 7

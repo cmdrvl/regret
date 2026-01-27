@@ -6,8 +6,10 @@ use std::process;
 use std::time::Duration as StdDuration;
 
 mod cache_path;
+mod fast_path;
 mod path_validation;
 mod scan_lock;
+mod selected_branch;
 mod store;
 
 /// Custom duration type for parsing time spans
@@ -612,7 +614,21 @@ fn run(config: Config) -> Result<()> {
     };
 
     if writes_cache {
-        let _store = store::Store::open(std::path::Path::new(".regret"))?;
+        let store = store::Store::open(std::path::Path::new(".regret"))?;
+        let repo_root = std::env::current_dir()?;
+        let selected = selected_branch::ensure_selected_branch(&repo_root, &store)?;
+        fast_path::ensure_meta_defaults(&store, &selected)?;
+
+        if config.debug {
+            eprintln!("Debug: selected_branch = {}", selected);
+        }
+
+        if matches!(mode, Mode::Default) && !config.no_scan {
+            let skip_scan = fast_path::should_skip_scan(&repo_root, &store, &selected)?;
+            if config.debug {
+                eprintln!("Debug: fast_path_skip_scan = {}", skip_scan);
+            }
+        }
     }
 
     // Execute based on resolved mode (with precedence)

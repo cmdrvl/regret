@@ -1,0 +1,120 @@
+name: Bench
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rustc version
+        id: rustc
+        run: |
+          echo "version=$(rustc -Vv | awk -F': ' '/release/ {print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache criterion baseline
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/criterion
+            bench-baseline
+          key: bench-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            bench-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Run benchmarks
+        run: |
+          if [ -f scripts/bench.sh ]; then
+            bash scripts/bench.sh artifacts/bench
+          else
+            mkdir -p artifacts/bench
+            cargo bench --all-features
+            echo '{"status":"no_macrobench_script","count":0}' > artifacts/bench/summary.json
+          fi
+        shell: bash
+
+      - name: Compare to baseline
+        env:
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+          IS_NIGHTLY: ${{ github.event_name == 'schedule' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          new_path = os.path.join("artifacts", "bench", "summary.json")
+          base_path = os.path.join("bench-baseline", "summary.json")
+
+          if not os.path.exists(new_path):
+            print("No new benchmark summary found; skipping comparison.")
+            sys.exit(0)
+
+          with open(new_path, "r", encoding="utf-8") as handle:
+            new_data = json.load(handle)
+
+          if new_data.get("status") != "ok":
+            print(f"Benchmark status {new_data.get('status')}; skipping comparison.")
+            sys.exit(0)
+
+          if not os.path.exists(base_path):
+            print("No baseline found; skipping comparison.")
+            sys.exit(0)
+
+          with open(base_path, "r", encoding="utf-8") as handle:
+            base_data = json.load(handle)
+
+          if base_data.get("status") != "ok":
+            print("Baseline status not ok; skipping comparison.")
+            sys.exit(0)
+
+          new_mean = float(new_data.get("mean", 0.0))
+          base_mean = float(base_data.get("mean", 0.0))
+          if base_mean <= 0.0 or new_mean <= 0.0:
+            print("Invalid mean values; skipping comparison.")
+            sys.exit(0)
+
+          slowdown = (new_mean / base_mean) - 1.0
+          percent = slowdown * 100.0
+          print(f"Slowdown: {percent:.2f}%")
+
+          if slowdown >= 0.10:
+            print(f"::warning::Benchmark slowdown >=10%: {percent:.2f}%")
+
+          is_main = os.getenv("IS_MAIN", "false").lower() == "true"
+          is_nightly = os.getenv("IS_NIGHTLY", "false").lower() == "true"
+          if slowdown >= 0.20 and (is_main or is_nightly):
+            print(f"::error::Benchmark slowdown >=20% on main/nightly: {percent:.2f}%")
+            sys.exit(1)
+          PY
+        shell: bash
+
+      - name: Update baseline
+        if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+        run: |
+          mkdir -p bench-baseline
+          if [ -f artifacts/bench/summary.json ]; then
+            cp artifacts/bench/summary.json bench-baseline/summary.json
+          fi
+        shell: bash
+
+      - name: Upload bench artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-artifacts
+          path: artifacts/bench
+          retention-days: 7

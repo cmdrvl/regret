@@ -1,0 +1,11 @@
+Created:
+  commit-template.txt
+  ADOPTION.md
+  agent-snippets/regret-linked-fix.md
+  agent-snippets/regret-session-context.md
+  ci/github-actions-regret.yml
+  hooks/commit-msg
+
+Next steps:
+  git config commit.template .regret/commit-template.txt
+  git config --unset commit.template

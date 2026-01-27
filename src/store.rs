@@ -62,6 +62,43 @@ impl Store {
         &self.path
     }
 
+    pub(crate) fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        let value = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(value)
+    }
+
+    pub(crate) fn get_meta_value(&self, key: &str) -> Result<Option<String>> {
+        self.get_meta(key)
+    }
+
+    pub(crate) fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                [key, value],
+            )
+            .context("error: unable to set meta value")?;
+        Ok(())
+    }
+
+    pub(crate) fn set_meta_value(&self, key: &str, value: &str) -> Result<()> {
+        self.set_meta(key, value)
+    }
+
+    pub(crate) fn get_meta_bool(&self, key: &str) -> Result<Option<bool>> {
+        let value = self.get_meta(key)?;
+        Ok(value.map(|raw| raw == "true"))
+    }
+
+    pub(crate) fn set_meta_bool(&self, key: &str, value: bool) -> Result<()> {
+        self.set_meta(key, if value { "true" } else { "false" })
+    }
+
     /// Run database diagnostics and return formatted results
     pub(crate) fn run_diagnostics(&self, deep: bool) -> Result<DiagnosticResults> {
         use rusqlite::OptionalExtension;
