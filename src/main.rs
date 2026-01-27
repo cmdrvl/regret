@@ -6,6 +6,7 @@ use std::process;
 use std::time::Duration as StdDuration;
 
 mod cache_path;
+mod path_validation;
 mod store;
 
 /// Custom duration type for parsing time spans
