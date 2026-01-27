@@ -347,7 +347,11 @@ Default mode scanning:
 
 `--scan` mode:
 - incremental scan by default
-- if `--since/--until` provided: backfill scan coverage window (still incremental; do not rescan already-covered commits)
+- if `--since/--until` provided: backfill scan coverage window
+  - "backfill" means: extend `coverage_since_utc` backward to the requested `--since` boundary
+  - only scan commits in the newly-extended range `[requested_since, current_coverage_since)`
+  - do NOT rescan commits already within the existing coverage window
+  - example: if coverage is 30d and user runs `--scan --since 90d`, scan only the [90d-ago, 30d-ago) range
 - `--all`: rebuild cache from scratch
 
 Coverage:
@@ -438,7 +442,16 @@ A) Candidate evidence commits
 - Evidence candidates are commits within the scan coverage horizon whose **SUBJECT contains `revert` or `rollback`** (ASCII case-insensitive byte scan).
 - No other candidate sources. No message-body heuristics.
 
-B) Matching rule (first parent or empty tree)
+B) Patch-ID computation (git-compatible)
+- Use git's native `patch-id --stable` algorithm for portability and consistency with existing tooling.
+- Normalization rules (applied before hashing):
+  - Strip all whitespace-only changes
+  - Normalize line endings to LF (critical for cross-platform determinism)
+  - Ignore diff context line counts
+  - Hash only the `+`/`-` content lines with file paths
+- The resulting patch-id is a 40-hex SHA-1 (git's format) stored as 20 bytes in the DB.
+
+C) Matching rule (first parent or empty tree)
 - For an evidence candidate commit `E`: compute `patch_id(E)` from `diff(E, first_parent(E))` (or against the empty tree if `E` is a root commit).
 - For a culprit candidate commit `C`: compute `patch_id_rev(C)` from the reverse of `diff(C, first_parent(C))` (or reverse diff against the empty tree if `C` is a root commit).
 - A match occurs iff `patch_id(E) == patch_id_rev(C)`.
@@ -549,6 +562,8 @@ Default human output contains ONLY these blocks in this order:
 
 4) One line: RATE (facts only; include denominators):
 - `RATE events_per_100_commits=<x> events=<e> commits=<c>`
+- `commits` = count of commits on the selected branch within the ranking window `[until-since, until]`
+- `events` = count of regret events (signals) with evidence time in the ranking window and confidence >= `--min-confidence`
 
 5) Coverage line ONLY when incomplete OR `coverage_valid=false`:
 - `COVERAGE status=<complete|incomplete|invalid> coverage_since_utc=<ts> coverage_valid=<0|1>`
@@ -559,9 +574,17 @@ Default human output contains ONLY these blocks in this order:
 
 6) If zero events: activation block (facts + exact next commands only):
 - `NO_EVENTS reverts_detected_in_coverage_horizon=<n> linked_fix_trailers_detected_in_coverage_horizon=<n> coverage_days=<n>`
-- `NEXT: regret --init`
-- `NEXT: git config commit.template .regret/commit-template.txt`
-- `NEXT: regret --scan --since 180d`
+- Differentiate cause based on coverage vs signal presence:
+  - If `coverage_days < ranking_window_days`: coverage is incomplete
+    - `REASON: coverage_incomplete`
+    - `NEXT: regret --scan --since <ranking_window>`
+  - Else if `reverts_detected_in_coverage_horizon == 0 AND linked_fix_trailers_detected_in_coverage_horizon == 0`: no signals exist
+    - `REASON: no_signals_detected`
+    - `NEXT: regret --init`
+    - `NEXT: git config commit.template .regret/commit-template.txt`
+  - Else: signals exist but none meet confidence threshold or fall in ranking window
+    - `REASON: signals_outside_window_or_threshold`
+    - `NEXT: regret --since <longer_window> --min-confidence <lower>`
 
 ### 10.2 Robot Output (`--ndjson`)
 

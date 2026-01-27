@@ -1,0 +1,17 @@
+# APR Workflow Configuration
+# Generated: 2026-01-27T14:45:32Z
+
+name: default
+description: "command line tool to provide assurance layer for agent swarm activity"
+
+documents:
+  readme: "/Users/zac/Source/cmdrvl/regret/PLAN_FOR_ASSURANCE_LAYER.md"
+  spec: "/Users/zac/Source/cmdrvl/regret/IMPLEMENTATION_GUIDANCE.md"
+  implementation: ""
+
+oracle:
+  model: "5.2 Thinking"
+  thinking_time: heavy
+
+rounds:
+  output_dir: ".apr/rounds/default"

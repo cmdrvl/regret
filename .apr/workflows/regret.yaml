@@ -1,0 +1,17 @@
+# APR Workflow Configuration
+# Generated: 2026-01-27T14:46:42Z
+
+name: regret
+description: "cli tool to act as assurance layer for agent swarms"
+
+documents:
+  readme: "/Users/zac/Source/cmdrvl/regret/README.md"
+  spec: "/Users/zac/Source/cmdrvl/regret/PLAN_FOR_ASSURANCE_LAYER.md"
+  implementation: "/Users/zac/Source/cmdrvl/regret/IMPLEMENTATION_GUIDANCE.md"
+
+oracle:
+  model: "5.2 Thinking"
+  thinking_time: heavy
+
+rounds:
+  output_dir: ".apr/rounds/regret"

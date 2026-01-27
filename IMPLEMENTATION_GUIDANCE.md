@@ -103,9 +103,25 @@ Implement the bounded patch-id manual revert logic exactly:
   - multiple culprits: choose max(C.time), tie-break lexical SHA
   - one culprit matches multiple evidence commits: emit one signal per evidence
 
+### Patch-ID algorithm (git-compatible)
+Use git's native `patch-id --stable` algorithm for portability:
+- Preferred: shell out to `git patch-id --stable` via batched plumbing
+- Alternative: reimplement the algorithm in Rust if perf requires it
+
+Normalization rules (critical for cross-platform determinism):
+- **CRLF handling**: normalize all line endings to LF before computing patch-id
+  - This matches git's internal behavior
+  - Required for Windows compatibility—same commit must produce same patch-id on all platforms
+- Strip whitespace-only changes
+- Ignore diff context line counts
+- Hash only `+`/`-` content lines with file paths
+
+The resulting patch-id is a 40-hex SHA-1 (git's format), stored as 20 bytes in SQLite.
+
 Performance:
 - Cache patch ids (`patch_id`, `patch_id_rev`) keyed by SHA in SQLite.
 - Do not compute patch ids for all commits—only for candidates involved in matching.
+- Batch patch-id computation: collect all candidate SHAs, run one `git patch-id` invocation per batch.
 
 ## SQLite performance
 - WAL mode.
@@ -237,8 +253,9 @@ Tests assert:
 ### Hashing
 - Use `blake3` for:
   - repo/cache IDs (avoid origin URLs)
-  - fileset hashes
-  - patch-id hashes (or store patch-id as canonical bytes and hash for DB keys)
+  - fileset hashes (sorted file IDs → blake3)
+- Use git's native SHA-1 patch-id for patch-id equivalence (see §Patch-ID algorithm above)
+  - Do NOT use blake3 for patch-ids—git compatibility matters for debugging and tooling interop
 
 ---
 
