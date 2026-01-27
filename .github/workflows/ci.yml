@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release
+      - name: Test basic functionality
+        run: |
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            ./target/release/regret --version
+            ./target/release/regret --help | head -5
+          else
+            ./target/release/regret.exe --version
+            ./target/release/regret.exe --help
+          fi
+        shell: bash
+
+  test-nextest:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run tests with nextest
+        run: cargo nextest run --all-features --junit-output-dir artifacts/nextest
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}
+          path: artifacts/nextest/junit.xml
+          retention-days: 7
+
+  lint-scripts:
+    name: Lint Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ShellCheck for Unix install script
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Lint install.sh (if exists)
+        run: |
+          if [ -f scripts/install.sh ]; then
+            shellcheck scripts/install.sh
+          elif [ -f install.sh ]; then
+            shellcheck install.sh
+          else
+            echo "No install.sh found - skipping shellcheck"
+          fi
+
+      # PSScriptAnalyzer for Windows install script
+      - name: Install PowerShell
+        run: |
+          # Install PowerShell on Ubuntu
+          wget -q https://github.com/PowerShell/PowerShell/releases/download/v7.4.1/powershell_7.4.1-1.deb_amd64.deb
+          sudo dpkg -i powershell_7.4.1-1.deb_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install PSScriptAnalyzer
+        run: pwsh -Command "Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser"
+
+      - name: Lint install.ps1 (if exists)
+        run: |
+          if [ -f scripts/install.ps1 ]; then
+            pwsh -Command "Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Warning,Error"
+          elif [ -f install.ps1 ]; then
+            pwsh -Command "Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error"
+          else
+            echo "No install.ps1 found - skipping PSScriptAnalyzer"
+          fi
+
+  # Summary job to require all checks to pass
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, build, test-nextest, lint-scripts]
+    if: always()
+    steps:
+      - name: Check all jobs succeeded
+        run: |
+          if [[ "${{ needs.fmt.result }}" != "success" ]]; then
+            echo "Format job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.clippy.result }}" != "success" ]]; then
+            echo "Clippy job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.build.result }}" != "success" ]]; then
+            echo "Build job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-nextest.result }}" != "success" ]]; then
+            echo "Test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.lint-scripts.result }}" != "success" ]]; then
+            echo "Script linting job failed"
+            exit 1
+          fi
+          echo "All CI jobs passed successfully!"

@@ -1,0 +1,43 @@
+[package]
+name = "regret"
+version = "0.1.0"
+edition = "2021"
+authors = ["CMD+RVL <engineering@cmdrvl.com>"]
+description = "Single-verb, local-first, deterministic CLI that mines high-precision regret signals from git history"
+license = "MIT"
+repository = "https://github.com/cmdrvl/regret"
+documentation = "https://docs.rs/regret"
+readme = "README.md"
+keywords = ["git", "regret", "signals", "cli", "analysis"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "regret"
+path = "src/main.rs"
+
+[dependencies]
+# CLI parsing with derive macros
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# Date/time parsing and handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Regex for parsing
+regex = "1.10"
+libc = "0.2"
+
+[dev-dependencies]
+# Testing framework
+rstest = "0.18"
+tempfile = "3.8"
+assert_cmd = "2.0"
+predicates = "3.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

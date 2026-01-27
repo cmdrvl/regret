@@ -1,0 +1,21 @@
+time=2026-01-27T11:45:06.221-05:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=true !BADKEY=false
+time=2026-01-27T11:45:06.222-05:00 level=INFO msg="using database" path=/Users/zac/Source/cmdrvl/regret/.beads/beads.db
+time=2026-01-27T11:45:06.291-05:00 level=ERROR msg="cannot open database" error="post-migration validation failed: migration invariants failed:\n  - required_config_present: required config key missing: issue_prefix (database has 53 issues)"
+time=2026-01-27T11:45:07.679-05:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=true !BADKEY=false
+time=2026-01-27T11:45:07.679-05:00 level=INFO msg="using database" path=/Users/zac/Source/cmdrvl/regret/.beads/beads.db
+time=2026-01-27T11:45:07.793-05:00 level=ERROR msg="cannot open database" error="post-migration validation failed: migration invariants failed:\n  - required_config_present: required config key missing: issue_prefix (database has 53 issues)"
+time=2026-01-27T11:45:10.025-05:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=true !BADKEY=false
+time=2026-01-27T11:45:10.026-05:00 level=INFO msg="using database" path=/Users/zac/Source/cmdrvl/regret/.beads/beads.db
+time=2026-01-27T11:45:10.080-05:00 level=ERROR msg="cannot open database" error="post-migration validation failed: migration invariants failed:\n  - required_config_present: required config key missing: issue_prefix (database has 53 issues)"
+time=2026-01-27T11:45:14.275-05:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=true !BADKEY=false
+time=2026-01-27T11:45:14.276-05:00 level=INFO msg="using database" path=/Users/zac/Source/cmdrvl/regret/.beads/beads.db
+time=2026-01-27T11:45:14.313-05:00 level=ERROR msg="cannot open database" error="post-migration validation failed: migration invariants failed:\n  - required_config_present: required config key missing: issue_prefix (database has 53 issues)"
+time=2026-01-27T11:45:22.503-05:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=true !BADKEY=false
+time=2026-01-27T11:45:22.503-05:00 level=INFO msg="using database" path=/Users/zac/Source/cmdrvl/regret/.beads/beads.db
+time=2026-01-27T11:45:22.539-05:00 level=ERROR msg="cannot open database" error="post-migration validation failed: migration invariants failed:\n  - required_config_present: required config key missing: issue_prefix (database has 53 issues)"
+time=2026-01-27T11:45:38.724-05:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=true !BADKEY=false
+time=2026-01-27T11:45:38.725-05:00 level=INFO msg="using database" path=/Users/zac/Source/cmdrvl/regret/.beads/beads.db
+time=2026-01-27T11:45:38.762-05:00 level=ERROR msg="cannot open database" error="post-migration validation failed: migration invariants failed:\n  - required_config_present: required config key missing: issue_prefix (database has 53 issues)"
+time=2026-01-27T11:50:14.305-05:00 level=INFO msg="Daemon started (interval: %v, auto-commit: %v, auto-push: %v)" !BADKEY=5s !BADKEY=false !BADKEY=false
+time=2026-01-27T11:50:14.305-05:00 level=INFO msg="using database" path=/Users/zac/Source/cmdrvl/regret/.beads/beads.db
+time=2026-01-27T11:50:14.353-05:00 level=ERROR msg="cannot open database" error="post-migration validation failed: migration invariants failed:\n  - required_config_present: required config key missing: issue_prefix (database has 53 issues)"
