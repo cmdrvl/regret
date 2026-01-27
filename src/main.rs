@@ -266,6 +266,158 @@ fn parse_args() -> Result<Config> {
     Ok(config)
 }
 
+/// Implement --doctor command: read-only cache diagnostics
+fn run_doctor_command(config: &Config) -> Result<()> {
+    use std::fs;
+    use std::path::Path;
+
+    let cache_dir = Path::new(".regret");
+    let cache_db_path = cache_dir.join("cache.db");
+    let cache_wal_path = cache_dir.join("cache.db-wal");
+
+    println!("regret doctor");
+    println!();
+
+    // Check if cache directory exists
+    if !cache_dir.exists() {
+        println!("Cache: not found");
+        println!("  No .regret/ directory found");
+        return Ok(());
+    }
+
+    // Check if database file exists
+    if !cache_db_path.exists() {
+        println!("Cache: not found");
+        println!("  .regret/ directory exists but no cache.db found");
+        return Ok(());
+    }
+
+    // Report cache file sizes
+    match fs::metadata(&cache_db_path) {
+        Ok(metadata) => {
+            let db_size = metadata.len();
+            println!("Cache files:");
+            println!("  cache.db: {} bytes", db_size);
+
+            if cache_wal_path.exists() {
+                match fs::metadata(&cache_wal_path) {
+                    Ok(wal_metadata) => {
+                        let wal_size = wal_metadata.len();
+                        println!("  cache.db-wal: {} bytes", wal_size);
+                    }
+                    Err(_) => {
+                        println!("  cache.db-wal: exists but unable to read size");
+                    }
+                }
+            } else {
+                println!("  cache.db-wal: not present");
+            }
+        }
+        Err(_) => {
+            println!("Cache files: unable to read size information");
+        }
+    }
+    println!();
+
+    // Try to open database and run diagnostics
+    match store::Store::open(cache_dir) {
+        Ok(store) => match store.run_diagnostics(config.deep) {
+            Ok(results) => {
+                print_diagnostic_results(&results, config);
+            }
+            Err(e) => {
+                println!("Database diagnostics: error");
+                println!("  {}", e);
+            }
+        },
+        Err(e) => {
+            println!("Database: error opening cache");
+            println!("  {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Print formatted database diagnostic results
+fn print_diagnostic_results(results: &store::DiagnosticResults, config: &Config) {
+    // Database integrity
+    println!("Database integrity:");
+    println!("  PRAGMA quick_check: {}", results.quick_check);
+
+    // Schema version check
+    println!();
+    println!("Schema:");
+    match &results.schema_version {
+        Some(version) => {
+            println!("  schema_version: {}", version);
+            if version != "1" {
+                println!("  warning: expected schema_version=1, found {}", version);
+            }
+        }
+        None => {
+            println!("  schema_version: not found or unreadable");
+        }
+    }
+
+    // Tables
+    println!();
+    println!("Tables:");
+    let table_order = vec!["meta", "file", "commit", "fileset", "signal"];
+    for table in &table_order {
+        if let Some(info) = results.tables.get(*table) {
+            if info.exists {
+                match info.row_count {
+                    Some(count) => println!("  {}: exists ({} rows)", table, count),
+                    None => println!("  {}: exists (unable to count rows)", table),
+                }
+            } else {
+                println!("  {}: missing", table);
+            }
+        }
+    }
+
+    // Indexes
+    println!();
+    println!("Indexes:");
+    let index_order = vec!["signal_time", "signal_culprit"];
+    for index in &index_order {
+        if let Some(&exists) = results.indexes.get(*index) {
+            if exists {
+                println!("  {}: exists", index);
+            } else {
+                println!("  {}: missing", index);
+            }
+        }
+    }
+
+    // Coverage and scanning status
+    println!();
+    println!("Coverage:");
+    match &results.last_scanned_ref_oid {
+        Some(oid) => {
+            let short_oid = if oid.len() >= 12 { &oid[..12] } else { oid };
+            println!("  last_scanned_ref_oid: {}", short_oid);
+        }
+        None => println!("  last_scanned_ref_oid: not set (no scans yet)"),
+    }
+
+    match &results.coverage_since_utc {
+        Some(coverage) => println!("  coverage_since_utc: {}", coverage),
+        None => println!("  coverage_since_utc: not set"),
+    }
+
+    // Deep checks with --deep flag
+    if config.deep {
+        println!();
+        println!("Deep checks (--deep):");
+        match &results.integrity_check {
+            Some(result) => println!("  PRAGMA integrity_check: {}", result),
+            None => println!("  PRAGMA integrity_check: not run"),
+        }
+    }
+}
+
 /// Implement --init command: create templates and snippets
 fn run_init_command() -> Result<()> {
     use std::fs;
@@ -467,7 +619,7 @@ fn run(config: Config) -> Result<()> {
             run_init_command()?;
         }
         Mode::Doctor => {
-            println!("TODO: Implement doctor command (diagnostics)");
+            run_doctor_command(&config)?;
         }
         Mode::Scan => {
             println!("TODO: Implement scan command (git history scanning)");

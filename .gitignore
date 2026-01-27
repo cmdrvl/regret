@@ -25,3 +25,6 @@ target
 
 # Claude Code local settings
 .claude/
+
+# bv (beads viewer) local config and caches
+.bv/

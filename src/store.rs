@@ -1,6 +1,7 @@
 use crate::cache_path;
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -8,6 +9,23 @@ use std::time::Duration;
 const CACHE_DB_FILENAME: &str = "cache.db";
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA_V1_SQL: &str = include_str!("../docs/schema/sqlite/v1.sql");
+
+#[derive(Debug, Default)]
+pub(crate) struct TableInfo {
+    pub(crate) exists: bool,
+    pub(crate) row_count: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DiagnosticResults {
+    pub(crate) quick_check: String,
+    pub(crate) schema_version: Option<String>,
+    pub(crate) tables: HashMap<String, TableInfo>,
+    pub(crate) indexes: HashMap<String, bool>,
+    pub(crate) last_scanned_ref_oid: Option<String>,
+    pub(crate) coverage_since_utc: Option<String>,
+    pub(crate) integrity_check: Option<String>,
+}
 
 pub(crate) struct Store {
     #[allow(dead_code)]
@@ -42,6 +60,144 @@ impl Store {
     #[allow(dead_code)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Run database diagnostics and return formatted results
+    pub(crate) fn run_diagnostics(&self, deep: bool) -> Result<DiagnosticResults> {
+        use rusqlite::OptionalExtension;
+
+        let mut results = DiagnosticResults::default();
+
+        // Quick check (PRAGMA quick_check)
+        match self
+            .conn
+            .query_row("PRAGMA quick_check", [], |row: &rusqlite::Row| {
+                let result: String = row.get(0)?;
+                Ok(result)
+            }) {
+            Ok(result) => {
+                results.quick_check = if result == "ok" {
+                    "ok".to_string()
+                } else {
+                    format!("FAILED: {}", result)
+                };
+            }
+            Err(e) => {
+                results.quick_check = format!("ERROR: {}", e);
+            }
+        }
+
+        // Schema version check
+        match self.conn.query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |row: &rusqlite::Row| {
+                let version: String = row.get(0)?;
+                Ok(version)
+            },
+        ) {
+            Ok(version) => {
+                results.schema_version = Some(version);
+            }
+            Err(_) => {
+                results.schema_version = None;
+            }
+        }
+
+        // Check for core tables and get row counts
+        let tables_to_check = vec!["meta", "file", "commit", "fileset", "signal"];
+        for table in &tables_to_check {
+            let exists = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    [table],
+                    |_row: &rusqlite::Row| Ok(true),
+                )
+                .optional()?
+                .is_some();
+
+            let row_count = if exists {
+                self.conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {}", table),
+                    [],
+                    |row: &rusqlite::Row| {
+                        let count: i64 = row.get(0)?;
+                        Ok(count)
+                    },
+                ).ok()
+            } else {
+                None
+            };
+
+            results
+                .tables
+                .insert(table.to_string(), TableInfo { exists, row_count });
+        }
+
+        // Check indexes
+        let indexes_to_check = vec!["signal_time", "signal_culprit"];
+        for index in &indexes_to_check {
+            let exists = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                    [index],
+                    |_row: &rusqlite::Row| Ok(true),
+                )
+                .optional()?
+                .is_some();
+
+            results.indexes.insert(index.to_string(), exists);
+        }
+
+        // Coverage and scanning status
+        results.last_scanned_ref_oid = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='last_scanned_ref_oid'",
+                [],
+                |row: &rusqlite::Row| {
+                    let oid: String = row.get(0)?;
+                    Ok(oid)
+                },
+            )
+            .optional()?;
+
+        results.coverage_since_utc = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='coverage_since_utc'",
+                [],
+                |row: &rusqlite::Row| {
+                    let coverage: String = row.get(0)?;
+                    Ok(coverage)
+                },
+            )
+            .optional()?;
+
+        // Deep integrity check if requested
+        if deep {
+            match self
+                .conn
+                .query_row("PRAGMA integrity_check", [], |row: &rusqlite::Row| {
+                    let result: String = row.get(0)?;
+                    Ok(result)
+                }) {
+                Ok(result) => {
+                    results.integrity_check = Some(if result == "ok" {
+                        "ok".to_string()
+                    } else {
+                        format!("FAILED: {}", result)
+                    });
+                }
+                Err(e) => {
+                    results.integrity_check = Some(format!("ERROR: {}", e));
+                }
+            }
+        }
+
+        Ok(results)
     }
 }
 
