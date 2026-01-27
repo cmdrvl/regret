@@ -22,3 +22,6 @@ target
 
 # APR (Assurance for Planning Review) session artifacts
 .apr/
+
+# Claude Code local settings
+.claude/
