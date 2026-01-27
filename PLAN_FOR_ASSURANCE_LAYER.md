@@ -6,7 +6,7 @@
 > **Repo:** `cmdrvl/regret`
 > **Cargo Package:** `cmdrvl-regret`
 > **Binary:** `regret`
-> **Plan Version:** 2026-01-27.15
+> **Plan Version:** 2026-01-27.18
 
 ---
 
@@ -130,20 +130,24 @@ regret [sha:<sha>] [FLAGS]
 ### 4.3 Flags (v0.1 Surface Area Budget)
 
 Core:
+- `--version` (print version and exit)
 - `--init`
 - `--scan` (scan-only)
 - `--all` (scan: full rebuild)
 - `--doctor`
 - `--deep` (doctor only; enables slow checks)
 - `--no-scan` (default mode only; skip scan step)
+  - uses cached data only; does not check for new commits
+  - fails with exit code 1 if `cache_valid=false` or `coverage_valid=false`
+  - useful for CI jobs that only need ranking from a previously-scanned cache
 
 Windowing:
 - `--since <duration|date>` (ranking window; scan backfill window in `--scan` mode)
 - `--until <date>` (ranking end; scan backfill end in `--scan` mode)
 
 Ranking:
-- `--limit <n>`
-- `--min-confidence <0.0-1.0>`
+- `--limit <n>` (default: 5)
+- `--min-confidence <0.0-1.0>` (default: 0.0)
 
 Output:
 - `--table` (default)
@@ -190,6 +194,53 @@ Example:
 ```bash
 regret --since 7d --min-confidence 0.9 --fail-if "regret_events >= 1 and max_score > 20"
 ```
+
+### 4.6 Exit Codes (Deterministic)
+
+| Code | Meaning | When |
+|------|---------|------|
+| 0 | Success | Normal completion, no policy violations |
+| 1 | Runtime error | Invalid cache, can't open repo, scan lock held, permission denied, unresolvable SHA |
+| 2 | Usage error | Invalid flags, malformed arguments, unknown options |
+| 3 | Policy violation | `--fail-if` expression evaluated true |
+
+Rules:
+- exit codes are stable and part of the contract
+- `--ndjson` mode uses the same exit codes; errors go to stderr
+- `--doctor` exits 0 even if it reports warnings (diagnostics are informational)
+
+### 4.7 Configuration File (Optional)
+
+Location: `<repo_root>/.regret/config.toml`
+
+Format: TOML (chosen for simplicity and Rust ecosystem alignment)
+
+Schema (v0.1):
+```toml
+# .regret/config.toml
+
+[scan]
+bootstrap_since = "45d"        # default bootstrap horizon for first run
+
+[ranking]
+default_since = "30d"          # default --since for ranking window
+weights.revert = 10            # weight for revert signals
+weights.linked_fix = 8         # weight for linked_fix signals
+
+[hotspot]
+min_events = 2                 # minimum events to qualify as hotspot
+min_culprits = 2               # minimum distinct culprits
+min_confidence = 0.0           # minimum signal confidence
+
+[cache]
+wal_checkpoint_threshold_mb = 64  # trigger PASSIVE checkpoint when WAL exceeds this
+```
+
+Rules:
+- all settings have sensible defaults; config file is optional
+- CLI flags override config file values where applicable
+- unknown keys are ignored with a warning (forward compatibility)
+- invalid values fail with exit code 2
 
 ---
 
@@ -271,7 +322,7 @@ Checkpoint policy:
 - never checkpoint on every incremental scan
 - checkpoint only on:
   - `--scan --all` completion (TRUNCATE)
-  - WAL exceeds `wal_checkpoint_threshold_mb` (PASSIVE)
+  - WAL exceeds `wal_checkpoint_threshold_mb` (default: 64MB; PASSIVE checkpoint)
 
 ### 6.3 Minimal Schema (v0.1)
 
@@ -291,7 +342,6 @@ CREATE TABLE commit (
   subject TEXT,
   pr_number INTEGER,
   pr_source TEXT,      -- 'merge_commit' or NULL
-  is_bot INTEGER NOT NULL DEFAULT 0,
   patch_id BLOB,       -- NULL unless computed (manual revert matching)
   patch_id_rev BLOB,   -- NULL unless computed
   files_hash BLOB      -- NULL unless needed for surfaces
@@ -430,7 +480,8 @@ Emit:
 - `type = revert`
 - `culprit_sha = <sha>`
 - `evidence_sha = <revert_commit_sha>`
-- confidence: `0.95`
+- `confidence = 0.95`
+- `confidence_reason = canonical_revert_line`
 
 ### 8.2 `revert` (Manual Revert Equivalence via Patch-ID)
 
@@ -456,7 +507,7 @@ C) Matching rule (first parent or empty tree)
 - For a culprit candidate commit `C`: compute `patch_id_rev(C)` from the reverse of `diff(C, first_parent(C))` (or reverse diff against the empty tree if `C` is a root commit).
 - A match occurs iff `patch_id(E) == patch_id_rev(C)`.
 
-C) Search bounds (same horizon; time-bounded)
+D) Search bounds (same horizon; time-bounded)
 - Only consider culprit candidates `C` where:
   - `C.time_utc <= E.time_utc`, and
   - `C.time_utc >= coverage_since_utc` (same scan coverage horizon).
@@ -465,16 +516,16 @@ C) Search bounds (same horizon; time-bounded)
   - search buckets from `E.time_utc` backward to `coverage_since_utc`
   - in each bucket, compute `patch_id_rev(C)` lazily for commits whose `patch_id_rev` is missing, then compare to `patch_id(E)`
 
-D) Collision resolution
+E) Collision resolution
 - If multiple culprits match the same evidence `E`, choose the culprit with the maximal `C.time_utc` (closest prior). Tie-break by lexical `C.sha`.
 - If one culprit matches multiple evidence commits, emit one signal per evidence commit (distinct `evidence_sha`).
 
-E) Caching
+F) Caching
 - Store `patch_id` and `patch_id_rev` per SHA (`commit.patch_id`, `commit.patch_id_rev`).
 - Compute lazily only when needed; never precompute across all commits.
 - Never recompute once stored.
 
-F) Confidence
+G) Confidence
 - Manual patch-id revert emits:
   - `confidence = 0.90`
   - `confidence_reason = patch_id_equivalence`
@@ -489,8 +540,12 @@ Rules:
 - accept 7–40 hex prefixes; resolve against local repo deterministically
 - if ambiguous prefix: do not emit a signal; record a debug diagnostic only with `--debug`
 
-Confidence:
-- `0.92` (deterministic explicit attribution)
+Emit:
+- `type = linked_fix`
+- `culprit_sha = <resolved_sha>`
+- `evidence_sha = <fix_commit_sha>`
+- `confidence = 0.92`
+- `confidence_reason = explicit_trailer`
 
 ---
 
@@ -511,15 +566,31 @@ Surfaces are file paths derived from file sets. v0.1 keeps this cheap:
 - compute/store file sets only for commits that are culprits or evidence in emitted signals
 - do not precompute file sets for all commits in the window
 
-Ignore patterns:
-- default-on patterns to reduce noise (generated, build outputs, vendor, lockfiles, etc.)
-- ignored-file count is reported only in explain/NDJSON diagnostics (not in default human output)
+Ignore patterns (default-on, configurable via `[surfaces]` in config):
+- `**/node_modules/**`
+- `**/vendor/**`
+- `**/target/**` (Rust)
+- `**/dist/**`, `**/build/**`
+- `**/*.lock`, `**/package-lock.json`, `**/yarn.lock`, `**/pnpm-lock.yaml`
+- `**/*.min.js`, `**/*.min.css`
+- `**/*.generated.*`, `**/*_generated.*`
+- `**/.git/**`
+
+Config override (in `.regret/config.toml`):
+```toml
+[surfaces]
+ignore_patterns = ["**/node_modules/**", "**/vendor/**"]  # replaces defaults
+additional_ignore = ["**/my_generated/**"]                 # extends defaults
+```
+
+Ignored-file count is reported only in explain/NDJSON diagnostics (not in default human output)
 
 Hotspot:
 - requires:
-  - `hotspot.min_events >= 2`
-  - `hotspot.min_culprits >= 2`
-  - `signal.confidence >= hotspot.min_confidence`
+  - `hotspot.min_events >= 2` (default: 2; config-file only in v0.1)
+  - `hotspot.min_culprits >= 2` (default: 2; config-file only in v0.1)
+  - `signal.confidence >= hotspot.min_confidence` (default: 0.0; config-file only in v0.1)
+- hotspot thresholds are config-file settings, not CLI flags (keeps CLI surface minimal)
 - if no hotspot: print deterministic **Top surface** (facts only; no labels):
   - the single surface with maximal regret score in the window (ties broken deterministically by path)
 
@@ -589,11 +660,30 @@ Default human output contains ONLY these blocks in this order:
 ### 10.2 Robot Output (`--ndjson`)
 
 NDJSON record types (v0.1):
-- `meta`
-- `rank`
-- `evidence`
-- `stat`
-- `diag` (only with `--debug`, and still valid NDJSON)
+- `meta` — exactly one; run metadata
+- `rank` — one per culprit in output
+- `evidence` — one per signal
+- `stat` — aggregate statistics
+- `diag` — diagnostics (only with `--debug`, still valid NDJSON)
+
+Required `meta` fields (v0.1):
+- `schema_version` (integer, currently `1`)
+- `tool_version` (semver string)
+- `repo_id` (blake3 hash of git_common_dir; see §6.1)
+- `repo_basename` (last path component of repo root)
+- `selected_branch` (resolved branch name)
+- `window_since_utc`, `window_until_utc` (ISO-8601)
+- `window_until_source` (`flag` | `github_actions_head_committer_time` | `wall_clock`)
+- `coverage_since_utc` (ISO-8601)
+- `coverage_valid` (boolean)
+- `cache_valid` (boolean)
+
+Required `stat` records (v0.1):
+- `stat.regret_events` — count of signals in ranking window
+- `stat.max_score` — highest culprit score
+- `stat.events_per_100_commits` — rate metric
+- `stat.commits_in_window` — denominator for rate
+- `stat.coverage_days` — days of scan coverage
 
 Ordering:
 1) `meta` (exactly one)
@@ -618,6 +708,37 @@ Surfaces must be explainable without flags:
 Schema docs:
 - `docs/schema/ndjson/v1.md` (authoritative)
 
+### 10.3 Explain Mode Output (`regret sha:<sha>`)
+
+When a culprit id is provided (`regret sha:<sha>`), output details for that specific culprit.
+
+Behavior:
+- if `<sha>` resolves to a commit that is NOT a culprit (no signals reference it): print `NO_SIGNALS culprit=sha:<sha>` and exit 0
+- if `<sha>` is ambiguous or unresolvable: print error to stderr and exit 1
+- if `<sha>` is a known culprit: print evidence details
+
+Human output (`--table`, default):
+```
+CULPRIT sha:<short_sha> score=<n> events=<n> ttr_p50_h=<h> culprit_date_utc=<date>
+  subject: <full_subject_truncated_120>
+
+EVIDENCE (sorted by evidence_time desc):
+  type        evidence_sha   evidence_date_utc  ttr_h   conf   confidence_reason
+  revert      sha:<short>    2026-01-15         2.3     0.95   canonical_revert_line
+  linked_fix  sha:<short>    2026-01-10         48.1    0.92   explicit_trailer
+
+SURFACES (top 5 by score):
+  path                          score  events
+  src/auth/login.rs             18     2
+  src/api/handlers.rs           10     1
+```
+
+NDJSON output (`--ndjson`):
+- emits `meta` record (same as default mode)
+- emits one `rank` record for the culprit (or none if not a culprit)
+- emits all `evidence` records for that culprit (sorted by evidence_time desc, then evidence_sha)
+- does NOT emit `stat` records (stats are for aggregate views)
+
 ---
 
 ## 11. Workflow Embedding (CI Gates, Hooks, Agents)
@@ -631,6 +752,7 @@ Schema docs:
   - `.regret/commit-template.txt` (commit message template with commented trailer examples; exact content below)
   - `.regret/ADOPTION.md` (exact enable/disable commands; exact content below)
   - `.regret/agent-snippets/regret-linked-fix.md` (agent prompt snippet; exact content below)
+  - `.regret/agent-snippets/regret-session-context.md` (agent prompt snippet for CASS join keys; exact content below)
   - `.regret/ci/github-actions-regret.yml` (copy/paste snippet)
   - `.regret/hooks/commit-msg` (advisory; always exit 0)
 
@@ -644,9 +766,10 @@ Schema docs:
 # Fixes-Commit: <full_sha>
 # Fixes-SHA: <full_sha>
 #
-# Optional (ignored by v0.1 scoring; reserved for future enrichment):
+# Optional (context only; never affects scoring; enables CASS/beads join):
 # Bead-Ref: <id>
 # Work-Ref: <token>
+# Session-Ref: <session_id>
 ```
 
 `.regret/ADOPTION.md` (exact content):
@@ -675,6 +798,19 @@ When you make a follow-up fix for a previous commit, add a trailer referencing t
 - Add: `Fixes-Commit: <full 40-hex SHA>` in the commit message trailers/footer section.
 - Use the full SHA (no prefixes).
 - The SHA MUST be the culprit (the change being fixed), not the evidence/fix commit.
+```
+
+`.regret/agent-snippets/regret-session-context.md` (exact content):
+```markdown
+# regret: session context trailers (agent rule)
+
+Always include work tracking trailers in your commits to enable conversation-to-code traceability:
+
+- Add: `Bead-Ref: <bead_id>` if you are working on a tracked issue (e.g., `Bead-Ref: beads-42`)
+- Add: `Work-Ref: <token>` if you have a work token from your orchestrator
+- Optionally add: `Session-Ref: <session_id>` if your session ID is available
+
+These trailers enable `cass` and other tools to join commit history back to the conversation that produced it. They do not affect regret scoring—they are context only.
 ```
 
 `--init` output MUST print:
@@ -1250,3 +1386,33 @@ Future: shared cache across worktrees and multi-branch scanning (requires carefu
 
 - beads mapping (best-effort)
 - mcp-agent-mail or other local sources (optional evidence/context only; never required; never affects scoring by default)
+
+### 19.5.1 CASS Compatibility (Conversation Join Keys)
+
+Enable joining regret signals to conversation history via `cass` (conversation/session search):
+
+**Join keys (parsed from commit trailers, never affect scoring):**
+- `Work-Ref: <token>` / `Bead-Ref: <id>` — preferred join key; links commit to tracked work item
+- `Session-Ref: <session_id>` — optional stronger join; links commit to specific agent session
+
+**Behavior:**
+- If present, regret extracts these trailers and includes them in NDJSON `evidence` records as additive context fields:
+  - `work_ref` (string or null)
+  - `bead_ref` (string or null)
+  - `session_ref` (string or null)
+- These fields are **display/join only**; they never affect `weight`, `confidence`, or `score`
+- Aligns with "enrichment must not change scoring" rule
+
+**Usage:**
+- External tools (cass, beads) can join on these fields to surface conversation context for a regret signal
+- Example: `cass search --session <session_ref>` to find the agent conversation that produced a culprit commit
+
+**Agent snippet (added to `--init`):**
+- `.regret/agent-snippets/regret-session-context.md` instructs agents to include `Bead-Ref` and optionally `Session-Ref` in commits
+
+### 19.6 Bot Detection (`is_bot`)
+
+Future: add `is_bot` column to commit table for filtering/weighting bot-authored commits differently.
+- detection heuristics: author email patterns, commit message patterns, known bot names
+- usage: optional filtering in ranking, separate bot-vs-human rate stats
+- not in v0.1 schema to avoid unused columns; add when there's a concrete use case

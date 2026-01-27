@@ -156,6 +156,13 @@ Robot outputs:
   - `surface_included`, `surface_total`, `surface_coverage`
   - `culprit_time`, `evidence_time`, `time_to_regret_hours`
 
+## Configuration file
+- Location: `.regret/config.toml`
+- Format: TOML (use `toml` crate)
+- Load order: defaults → config file → CLI flags (CLI wins)
+- Unknown keys: warn but don't fail (forward compatibility)
+- Invalid values: fail with exit code 2
+
 ## Install + init as adoption lever
 `regret --init` should:
 - create `.regret/commit-template.txt` containing commented trailers:
