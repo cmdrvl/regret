@@ -432,27 +432,39 @@ Emit:
 
 Purpose: deterministic recall boost without heuristic overlap.
 
-Algorithm (bounded, deterministic):
-1) Identify candidate evidence commits whose **subject contains `revert` or `rollback`** (byte-scan, ASCII case-insensitive; no allocations).
-2) Bound candidates to the current scan coverage horizon:
-   - on first run this is `scan.bootstrap_since` (default `45d`)
-   - if the user scanned back further (`--scan --since ...`), the horizon expands deterministically
-2) Compute Patch-ID for:
-   - each candidate evidence commit (`patch_id`)
-   - each potential culprit commit’s reverse diff (`patch_id_rev`) **only as needed** during matching
-3) Match a manual revert evidence commit `E` to a culprit `C` when:
-   - `patch_id(E)` equals `patch_id_rev(C)` (or vice versa; exact rule fixed and documented)
-4) Resolve collisions deterministically:
-   - prefer nearest culprit by commit time <= evidence time
-   - break ties by lexical SHA
+Algorithm (exact; deterministic; bounded; cached; no heuristics):
 
-Caching:
-- store patch ids in `commit.patch_id`/`commit.patch_id_rev`
-- compute lazily only when needed (never patch-id every commit in a large scan)
-- never recompute for a SHA once stored (git objects are immutable; treat missing as “not computed yet”)
+A) Candidate evidence commits
+- Evidence candidates are commits within the scan coverage horizon whose **SUBJECT contains `revert` or `rollback`** (ASCII case-insensitive byte scan).
+- No other candidate sources. No message-body heuristics.
 
-Confidence:
-- `0.90` (lower than canonical line, but still deterministic)
+B) Matching rule (first parent or empty tree)
+- For an evidence candidate commit `E`: compute `patch_id(E)` from `diff(E, first_parent(E))` (or against the empty tree if `E` is a root commit).
+- For a culprit candidate commit `C`: compute `patch_id_rev(C)` from the reverse of `diff(C, first_parent(C))` (or reverse diff against the empty tree if `C` is a root commit).
+- A match occurs iff `patch_id(E) == patch_id_rev(C)`.
+
+C) Search bounds (same horizon; time-bounded)
+- Only consider culprit candidates `C` where:
+  - `C.time_utc <= E.time_utc`, and
+  - `C.time_utc >= coverage_since_utc` (same scan coverage horizon).
+- Use a time bucket index to avoid O(N²) comparisons:
+  - bucket culprits by hour (or day) within the horizon
+  - search buckets from `E.time_utc` backward to `coverage_since_utc`
+  - in each bucket, compute `patch_id_rev(C)` lazily for commits whose `patch_id_rev` is missing, then compare to `patch_id(E)`
+
+D) Collision resolution
+- If multiple culprits match the same evidence `E`, choose the culprit with the maximal `C.time_utc` (closest prior). Tie-break by lexical `C.sha`.
+- If one culprit matches multiple evidence commits, emit one signal per evidence commit (distinct `evidence_sha`).
+
+E) Caching
+- Store `patch_id` and `patch_id_rev` per SHA (`commit.patch_id`, `commit.patch_id_rev`).
+- Compute lazily only when needed; never precompute across all commits.
+- Never recompute once stored.
+
+F) Confidence
+- Manual patch-id revert emits:
+  - `confidence = 0.90`
+  - `confidence_reason = patch_id_equivalence`
 
 ### 8.3 `linked_fix` (Explicit Trailers)
 
@@ -495,8 +507,8 @@ Hotspot:
   - `hotspot.min_events >= 2`
   - `hotspot.min_culprits >= 2`
   - `signal.confidence >= hotspot.min_confidence`
-- if no hotspot: print deterministic **Top surface**:
-  - “largest surface by regret score in this window (not a hotspot)”
+- if no hotspot: print deterministic **Top surface** (facts only; no labels):
+  - the single surface with maximal regret score in the window (ties broken deterministically by path)
 
 ### 9.3 Evidence-Time Windowing (Make Surprise Visible)
 
@@ -514,29 +526,42 @@ Explain output MUST include:
 
 ### 10.1 Human Output (Default `--table`)
 
-Default prints:
-1) **Top 5 culprits** in the ranking window:
-   - `score`
-   - `events`
-   - `ttr_p50_h`
-   - `culprit_date` (UTC)
-   - `culprit_age` (computed from `--until`)
-   - `culprit` (`sha:abcd123` alias, optional `pr#` when present)
-   - `subject` (truncated)
-2) **Hotspot** line OR **Top surface** fallback line
-3) **Rate** line: `events_per_100_commits` (selected branch, same evidence-time window)
-4) **Coverage** line only if incomplete for window:
-   - `Coverage: incomplete (coverage_since=<ts>). Run: regret --scan --since <window_since>`
-   - if `coverage_valid=false`, always print:
-     - `Coverage: INVALID (history rewrite detected). Run: regret --scan --all`
-5) If **zero events**, print deterministic activation block:
-   - “No explicit reverts detected in coverage horizon.”
-   - “To enable linked-fix: run `regret --init`, then enable the commit template per `.regret/ADOPTION.md`.”
-   - “To increase coverage: regret --scan --since 180d”
-   - plus deterministic facts (no advice, just proof):
-     - `reverts_detected_in_coverage_horizon=0`
-     - `linked_fix_trailers_detected_in_coverage_horizon=0`
-     - `coverage_days=<N>`
+Default human output MUST be brutally minimal and 100% evidence-only: no interpretations, no “likely”, no labels.
+
+Default human output contains ONLY these blocks in this order:
+
+1) Header line (single line; facts only):
+- `regret <tool_version> repo=<repo_basename> branch=<selected_branch> scan=<skipped|ran> new_commits=<n> scanned_commits=<n> coverage_days=<n>`
+
+2) TOP table (max 5 rows) with columns exactly:
+- `id` (value: `sha:<short_sha>`)
+- `score`
+- `events`
+- `ttr_p50_h`
+- `culprit_date_utc`
+- `culprit_age`
+- `subject_trunc`
+- `conf` (value: minimum confidence among included events for that culprit in the window)
+
+3) One line: HOTSPOT (facts only) OR TOP_SURFACE fallback (facts only):
+- `HOTSPOT path=<path> score=<n> events=<n> culprits=<n>`
+- `TOP_SURFACE path=<path> score=<n> events=<n> culprits=<n>` (when hotspot thresholds are not met)
+
+4) One line: RATE (facts only; include denominators):
+- `RATE events_per_100_commits=<x> events=<e> commits=<c>`
+
+5) Coverage line ONLY when incomplete OR `coverage_valid=false`:
+- `COVERAGE status=<complete|incomplete|invalid> coverage_since_utc=<ts> coverage_valid=<0|1>`
+- if `status=incomplete`, append exact next command:
+  - `NEXT: regret --scan --since <window_since>`
+- if `status=invalid`, append exact next command:
+  - `NEXT: regret --scan --all`
+
+6) If zero events: activation block (facts + exact next commands only):
+- `NO_EVENTS reverts_detected_in_coverage_horizon=<n> linked_fix_trailers_detected_in_coverage_horizon=<n> coverage_days=<n>`
+- `NEXT: regret --init`
+- `NEXT: git config commit.template .regret/commit-template.txt`
+- `NEXT: regret --scan --since 180d`
 
 ### 10.2 Robot Output (`--ndjson`)
 
