@@ -202,7 +202,9 @@ jobs:
         uses: taiki-e/install-action@cargo-cyclonedx
 
       - name: Generate SBOM
-        run: cargo cyclonedx --format json --output-file dist/sbom.cdx.json
+        run: |
+          cargo cyclonedx --format json --override-filename sbom.cdx
+          mv sbom.cdx.json dist/sbom.cdx.json
 
       - name: Generate provenance
         run: |
