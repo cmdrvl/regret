@@ -59,7 +59,7 @@ globset = "0.4"
 
 # Windows file locking
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "winbase", "minwinbase"] }
+winapi = { version = "0.3", features = ["fileapi", "winbase", "minwinbase", "handleapi", "processthreadsapi", "securitybaseapi"] }
 
 [dev-dependencies]
 # Testing framework
