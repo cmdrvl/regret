@@ -156,7 +156,7 @@ try {
 
     if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $installDir })) {
         Write-Warn "regret is not on PATH. Add it with:"
-        Write-Host "  setx PATH \"$env:PATH;$installDir\""
+        Write-Host "  setx PATH `"$env:PATH;$installDir`""
         Write-Host "Then restart your shell."
     }
 
