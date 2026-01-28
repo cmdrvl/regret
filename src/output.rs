@@ -113,7 +113,14 @@ pub fn print_top_table(culprits: &[RankedCulprit], limit: usize) {
             culprit.score,
             culprit.events,
             culprit.ttr_p50_hours,
-            format!("{} {}", &culprit.culprit_date_utc[..10], short_sha),
+            format!(
+                "{} {}",
+                culprit
+                    .culprit_date_utc
+                    .get(..10)
+                    .unwrap_or(&culprit.culprit_date_utc),
+                short_sha
+            ),
             culprit.culprit_age,
             subject,
             culprit.min_confidence,
@@ -122,11 +129,13 @@ pub fn print_top_table(culprits: &[RankedCulprit], limit: usize) {
 }
 
 /// Truncate a subject line to the specified length.
+/// Uses character boundaries to avoid panicking on multi-byte UTF-8.
 fn truncate_subject(subject: &str, max_len: usize) -> String {
-    if subject.len() <= max_len {
+    if subject.chars().count() <= max_len {
         subject.to_string()
     } else {
-        format!("{}...", &subject[..max_len - 3])
+        let truncated: String = subject.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     }
 }
 
@@ -690,11 +699,7 @@ pub fn print_explain_human(info: &ExplainInfo) {
         .culprit_subject
         .clone()
         .unwrap_or_else(|| "(no subject)".to_string());
-    let subject_trunc = if subject.len() > 120 {
-        format!("{}...", &subject[..117])
-    } else {
-        subject
-    };
+    let subject_trunc = truncate_subject(&subject, 120);
     println!("  subject: {}", subject_trunc);
 
     // EVIDENCE section
@@ -831,7 +836,10 @@ pub fn print_hotspot_ndjson(path: &str, score: i64, events: usize, culprits: usi
         events,
         culprits,
     };
-    println!("{}", serde_json::to_string(&record).expect("serialize hotspot"));
+    println!(
+        "{}",
+        serde_json::to_string(&record).expect("serialize hotspot")
+    );
 }
 
 /// Print TOP_SURFACE line in human-readable format (fallback when no hotspot).
@@ -865,7 +873,10 @@ pub fn print_top_surface_ndjson(path: &str, score: i64, events: usize, culprits:
         events,
         culprits,
     };
-    println!("{}", serde_json::to_string(&record).expect("serialize top_surface"));
+    println!(
+        "{}",
+        serde_json::to_string(&record).expect("serialize top_surface")
+    );
 }
 
 #[cfg(test)]

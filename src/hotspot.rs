@@ -71,9 +71,7 @@ pub fn detect_hotspot(signals: &[HotspotSignal], config: &HotspotConfig) -> Opti
         })
         // Sort by score descending, then path ascending (lexical tie-break)
         .max_by(|a, b| {
-            a.score
-                .cmp(&b.score)
-                .then_with(|| b.path.cmp(&a.path)) // Reversed for ascending
+            a.score.cmp(&b.score).then_with(|| b.path.cmp(&a.path)) // Reversed for ascending
         })
 }
 
@@ -131,9 +129,7 @@ pub fn find_top_surface(signals: &[HotspotSignal], min_confidence: f64) -> Optio
         })
         // Sort by score descending, then path ascending (lexical tie-break)
         .max_by(|a, b| {
-            a.score
-                .cmp(&b.score)
-                .then_with(|| b.path.cmp(&a.path)) // Reversed for ascending
+            a.score.cmp(&b.score).then_with(|| b.path.cmp(&a.path)) // Reversed for ascending
         })
 }
 

@@ -76,7 +76,9 @@ impl IgnorePatterns {
             builder.add(glob);
         }
 
-        let globset = builder.build().context("Failed to build ignore pattern set")?;
+        let globset = builder
+            .build()
+            .context("Failed to build ignore pattern set")?;
         Ok(Self { globset })
     }
 
@@ -187,11 +189,7 @@ fn get_changed_files(repo: &Repository, commit: &git2::Commit) -> Result<Vec<Str
         None // Initial commit - all files are "added"
     };
 
-    let diff = repo.diff_tree_to_tree(
-        parent_tree.as_ref(),
-        Some(&tree),
-        Some(&mut diff_opts),
-    )?;
+    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut diff_opts))?;
 
     diff.foreach(
         &mut |delta, _| {
@@ -288,10 +286,8 @@ impl Store {
         }
 
         // Insert new
-        self.conn.execute(
-            "INSERT INTO file (path) VALUES (?1)",
-            [path],
-        )?;
+        self.conn
+            .execute("INSERT INTO file (path) VALUES (?1)", [path])?;
 
         Ok(self.conn.last_insert_rowid())
     }
@@ -300,7 +296,9 @@ impl Store {
     fn get_file_id(&self, path: &str) -> Result<Option<i64>> {
         use rusqlite::OptionalExtension;
         self.conn
-            .query_row("SELECT id FROM file WHERE path = ?1", [path], |row| row.get(0))
+            .query_row("SELECT id FROM file WHERE path = ?1", [path], |row| {
+                row.get(0)
+            })
             .optional()
             .context("Failed to query file ID")
     }
@@ -434,7 +432,10 @@ mod tests {
         let hash3 = compute_files_hash(&ids3);
 
         assert_eq!(hash1, hash2, "Same IDs should produce same hash");
-        assert_ne!(hash1, hash3, "Different order should produce different hash");
+        assert_ne!(
+            hash1, hash3,
+            "Different order should produce different hash"
+        );
     }
 
     #[test]
