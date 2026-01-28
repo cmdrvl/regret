@@ -34,8 +34,8 @@ libc = "0.2"
 # Regex for parsing
 regex = "1.10"
 
-# Git repository access
-git2 = "0.19"
+# Git repository access (vendored-openssl for cross-compilation)
+git2 = { version = "0.19", features = ["vendored-openssl"] }
 
 # LRU cache for validated paths
 lru = "0.12"
