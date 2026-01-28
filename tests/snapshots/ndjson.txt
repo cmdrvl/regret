@@ -1,10 +1,6 @@
-regret <VERSION> repo=repo branch=refs/heads/main scan=ran new_commits=38 scanned_commits=38 coverage_days=<DAYS>
-
- id  score events  ttr_p50_h     culprit_date_utc      age subject                                                                           conf
--------------------------------------------------------------------------------------------------------------------------------------------------
-  1     10      1        0.1   2024-01-01 1b39615 <AGE> Change feature B                                                                  0.95
-  2      8      1        0.1   2024-01-01 1d1ceb1 <AGE> Bad change                                                                        0.92
-
-RATE events_per_100_commits=5.26 events=2 commits=38
-COVERAGE status=invalid coverage_since_utc=2024-01-01T00:00:00+00:00 coverage_valid=0
-NEXT: regret --scan --all
+{"type":"meta","schema_version":1,"tool_version":"<VERSION>","repo_id":"<REPO_ID>","repo_basename":"repo","selected_branch":"refs/heads/main","window_since_utc":null,"window_until_utc":"2024-01-02T00:00:00+00:00","window_until_source":"Flag","coverage_since_utc":"2024-01-01T00:00:00+00:00","coverage_valid":false,"cache_valid":false}
+{"type":"stat","name":"regret_events","value":2}
+{"type":"stat","name":"max_score","value":10}
+{"type":"stat","name":"events_per_100_commits","value":5.263157894736842}
+{"type":"stat","name":"commits_in_window","value":38}
+{"type":"stat","name":"coverage_days","value":758}

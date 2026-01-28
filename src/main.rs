@@ -692,23 +692,24 @@ fn run(config: Config) -> Result<()> {
             println!("TODO: Implement explain mode for SHA: {}", sha);
         }
         Mode::Default => {
-            // Default ranking mode: print header and TOP table
-            run_ranking_output(&config, &store, &selected, new_commits, scan_status)?;
+            // Default ranking mode: print output (NDJSON or human-readable)
+            run_ranking_output(&config, &store, &selected, new_commits, scan_status, &until_info)?;
         }
     }
 
     Ok(())
 }
 
-/// Run the default ranking output (header + TOP table + RATE + COVERAGE/NO_EVENTS).
+/// Run the default ranking output (header + TOP table + RATE + COVERAGE/NO_EVENTS or NDJSON).
 fn run_ranking_output(
     config: &Config,
     store: &store::Store,
     selected: &str,
     new_commits: usize,
     scan_status: output::ScanStatus,
+    until_info: &time_window::UntilInfo,
 ) -> Result<()> {
-    // Get repo basename
+    // Get repo info
     let repo_root = std::env::current_dir()?;
     let repo_basename = repo_root
         .file_name()
@@ -719,6 +720,8 @@ fn run_ranking_output(
     let coverage_since_utc = store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)?;
     let coverage_valid_str = store.get_meta_value("coverage_valid")?;
     let coverage_valid = coverage_valid_str.as_deref() == Some("1");
+    let cache_valid_str = store.get_meta_value("cache_valid")?;
+    let cache_valid = cache_valid_str.as_deref() == Some("1");
 
     // Compute coverage days
     let coverage_days = match &coverage_since_utc {
@@ -737,7 +740,39 @@ fn run_ranking_output(
     // Get total scanned commits
     let scanned_commits = store.get_commit_count()?;
 
-    // Print header
+    // Get signals and aggregate
+    let signals = store.get_signals_for_ranking(selected)?;
+    let min_confidence = config.min_confidence.unwrap_or(0.0);
+    let ranked = output::aggregate_culprits(&signals, min_confidence);
+
+    // Count events and max score
+    let events: usize = ranked.iter().map(|c| c.events).sum();
+    let max_score = ranked.first().map(|c| c.score).unwrap_or(0);
+
+    // NDJSON output mode
+    if config.ndjson {
+        let window_until_source = format!("{:?}", until_info.source);
+
+        output::print_ndjson(&output::NdjsonInfo {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            repo_path: repo_root,
+            repo_basename,
+            selected_branch: selected.to_string(),
+            window_since_utc: None, // TODO: from config.since if set
+            window_until_utc: until_info.until.to_rfc3339(),
+            window_until_source,
+            coverage_since_utc: coverage_since_utc.clone(),
+            coverage_valid,
+            cache_valid,
+            events,
+            max_score,
+            commits_in_window: scanned_commits,
+            coverage_days,
+        });
+        return Ok(());
+    }
+
+    // Human-readable output
     let header = output::HeaderInfo {
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
         repo_basename,
@@ -748,14 +783,6 @@ fn run_ranking_output(
         coverage_days,
     };
     output::print_header(&header);
-
-    // Get signals and aggregate
-    let signals = store.get_signals_for_ranking(selected)?;
-    let min_confidence = config.min_confidence.unwrap_or(0.0);
-    let ranked = output::aggregate_culprits(&signals, min_confidence);
-
-    // Count events (total number of signals that pass confidence threshold)
-    let events = ranked.iter().map(|c| c.events).sum();
 
     // Print TOP table (if we have culprits)
     let limit = config.limit.unwrap_or(5) as usize;

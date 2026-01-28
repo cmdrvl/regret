@@ -1,10 +1,13 @@
 //! Output formatting for regret CLI.
 //!
-//! This module implements human-readable output per §10.1:
+//! This module implements human-readable output per §10.1 and NDJSON output per §10.2:
 //! - Header line (§10.1.1)
 //! - TOP culprits table (§10.1.2)
+//! - NDJSON meta and stat records (§10.2)
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// Summary information for the header line.
 pub struct HeaderInfo {
@@ -297,6 +300,120 @@ pub fn print_no_events(info: &NoEventsInfo) {
         NoEventsReason::SignalsOutsideWindow => {
             println!("NEXT: regret --since 90d # widen ranking window");
         }
+    }
+}
+
+// =============================================================================
+// NDJSON Output (§10.2)
+// =============================================================================
+
+/// NDJSON meta record per §10.2.
+#[derive(Debug, Clone, Serialize)]
+pub struct NdjsonMeta {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub schema_version: u32,
+    pub tool_version: String,
+    pub repo_id: String,
+    pub repo_basename: String,
+    pub selected_branch: String,
+    pub window_since_utc: Option<String>,
+    pub window_until_utc: String,
+    pub window_until_source: String,
+    pub coverage_since_utc: Option<String>,
+    pub coverage_valid: bool,
+    pub cache_valid: bool,
+}
+
+/// NDJSON stat record per §10.2.
+#[derive(Debug, Clone, Serialize)]
+pub struct NdjsonStat {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub name: String,
+    pub value: serde_json::Value,
+}
+
+impl NdjsonStat {
+    pub fn new<V: Into<serde_json::Value>>(name: &str, value: V) -> Self {
+        Self {
+            record_type: "stat",
+            name: name.to_string(),
+            value: value.into(),
+        }
+    }
+}
+
+/// Info for NDJSON output.
+pub struct NdjsonInfo {
+    pub tool_version: String,
+    pub repo_path: std::path::PathBuf,
+    pub repo_basename: String,
+    pub selected_branch: String,
+    pub window_since_utc: Option<String>,
+    pub window_until_utc: String,
+    pub window_until_source: String,
+    pub coverage_since_utc: Option<String>,
+    pub coverage_valid: bool,
+    pub cache_valid: bool,
+    pub events: usize,
+    pub max_score: i64,
+    pub commits_in_window: usize,
+    pub coverage_days: Option<u64>,
+}
+
+/// Compute a stable repo_id from the repo path (SHA256 hash, first 16 hex chars).
+pub fn compute_repo_id(repo_path: &std::path::Path) -> String {
+    let path_str = repo_path.to_string_lossy();
+    let mut hasher = Sha256::new();
+    hasher.update(path_str.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8]) // 16 hex chars
+}
+
+/// Print NDJSON output (meta record + stat records).
+///
+/// Output goes to stdout as newline-delimited JSON.
+pub fn print_ndjson(info: &NdjsonInfo) {
+    let repo_id = compute_repo_id(&info.repo_path);
+
+    // Meta record (exactly one, first)
+    let meta = NdjsonMeta {
+        record_type: "meta",
+        schema_version: 1,
+        tool_version: info.tool_version.clone(),
+        repo_id,
+        repo_basename: info.repo_basename.clone(),
+        selected_branch: info.selected_branch.clone(),
+        window_since_utc: info.window_since_utc.clone(),
+        window_until_utc: info.window_until_utc.clone(),
+        window_until_source: info.window_until_source.clone(),
+        coverage_since_utc: info.coverage_since_utc.clone(),
+        coverage_valid: info.coverage_valid,
+        cache_valid: info.cache_valid,
+    };
+    println!("{}", serde_json::to_string(&meta).expect("serialize meta"));
+
+    // Stat records (fixed order by name)
+    let rate = if info.commits_in_window > 0 {
+        (info.events as f64 / info.commits_in_window as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let stats = [
+        NdjsonStat::new("regret_events", info.events as i64),
+        NdjsonStat::new("max_score", info.max_score),
+        NdjsonStat::new("events_per_100_commits", rate),
+        NdjsonStat::new("commits_in_window", info.commits_in_window as i64),
+        NdjsonStat::new(
+            "coverage_days",
+            info.coverage_days.map(|d| d as i64).unwrap_or(-1),
+        ),
+    ];
+
+    for stat in stats {
+        println!("{}", serde_json::to_string(&stat).expect("serialize stat"));
     }
 }
 
