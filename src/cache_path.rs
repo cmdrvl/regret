@@ -49,10 +49,19 @@ pub(crate) fn create_file_secure(path: &Path) -> Result<fs::File> {
 }
 
 fn create_dir_secure(path: &Path) -> Result<()> {
+    use std::path::Component;
+
     let mut cursor = PathBuf::new();
 
     for component in path.components() {
         cursor.push(component);
+
+        // Skip prefix and root components (e.g., \\?\C: or /)
+        // These are system-level paths that cannot be created
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+
         if cursor.exists() {
             let metadata = fs::symlink_metadata(&cursor)
                 .with_context(|| format!("error: unable to stat {}", cursor.display()))?;
