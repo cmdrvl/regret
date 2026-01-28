@@ -7,6 +7,7 @@ use std::time::Duration as StdDuration;
 
 mod cache_path;
 mod fast_path;
+mod patch_id;
 mod path_validation;
 mod scan;
 mod scan_lock;

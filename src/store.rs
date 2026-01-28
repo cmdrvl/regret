@@ -215,6 +215,68 @@ impl Store {
         Ok(exists)
     }
 
+    /// Get the patch_id for a commit (20 bytes, stored as BLOB).
+    pub(crate) fn get_patch_id(&self, sha: &str) -> Result<Option<[u8; 20]>> {
+        let result: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT patch_id FROM \"commit\" WHERE sha=?1",
+                [sha],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match result {
+            Some(bytes) if bytes.len() == 20 => {
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(arr))
+            }
+            Some(_) => Ok(None), // Invalid length, treat as missing
+            None => Ok(None),
+        }
+    }
+
+    /// Set the patch_id for a commit (20 bytes, stored as BLOB).
+    pub(crate) fn set_patch_id(&self, sha: &str, patch_id: &[u8; 20]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE \"commit\" SET patch_id=?1 WHERE sha=?2",
+            params![patch_id.as_slice(), sha],
+        )?;
+        Ok(())
+    }
+
+    /// Get the patch_id_rev (reverse patch-id) for a commit.
+    pub(crate) fn get_patch_id_rev(&self, sha: &str) -> Result<Option<[u8; 20]>> {
+        let result: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT patch_id_rev FROM \"commit\" WHERE sha=?1",
+                [sha],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match result {
+            Some(bytes) if bytes.len() == 20 => {
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(arr))
+            }
+            Some(_) => Ok(None), // Invalid length, treat as missing
+            None => Ok(None),
+        }
+    }
+
+    /// Set the patch_id_rev (reverse patch-id) for a commit.
+    pub(crate) fn set_patch_id_rev(&self, sha: &str, patch_id_rev: &[u8; 20]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE \"commit\" SET patch_id_rev=?1 WHERE sha=?2",
+            params![patch_id_rev.as_slice(), sha],
+        )?;
+        Ok(())
+    }
+
     /// Run database diagnostics and return formatted results
     pub(crate) fn run_diagnostics(&self, deep: bool) -> Result<DiagnosticResults> {
         use rusqlite::OptionalExtension;
