@@ -94,16 +94,22 @@ jobs:
             echo "No install.sh found - skipping shellcheck"
           fi
 
-      # PowerShell syntax check (basic validation without PSScriptAnalyzer)
+      # PowerShell syntax check (parse without executing)
       - name: Validate PowerShell syntax (if exists)
+        shell: pwsh
         run: |
-          if [ -f scripts/install.ps1 ]; then
-            pwsh -Command "\$null = [System.Management.Automation.Language.Parser]::ParseFile('scripts/install.ps1', [ref]\$null, [ref]\$errors); if (\$errors) { \$errors | ForEach-Object { Write-Error \$_ }; exit 1 }"
-          elif [ -f install.ps1 ]; then
-            pwsh -Command "\$null = [System.Management.Automation.Language.Parser]::ParseFile('install.ps1', [ref]\$null, [ref]\$errors); if (\$errors) { \$errors | ForEach-Object { Write-Error \$_ }; exit 1 }"
-          else
-            echo "No install.ps1 found - skipping PowerShell validation"
-          fi
+          $scriptPath = "scripts/install.ps1"
+          if (Test-Path $scriptPath) {
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$errors)
+            if ($errors) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
+            Write-Host "PowerShell syntax OK: $scriptPath"
+          } else {
+            Write-Host "No install.ps1 found - skipping"
+          }
 
   # Summary job to require all checks to pass
   ci-success:
