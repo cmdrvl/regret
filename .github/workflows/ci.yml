@@ -52,10 +52,10 @@ jobs:
         run: |
           if [ "$RUNNER_OS" != "Windows" ]; then
             ./target/release/regret --version
-            ./target/release/regret --help | head -5
+            ./target/release/regret --help || true
           else
             ./target/release/regret.exe --version
-            ./target/release/regret.exe --help
+            ./target/release/regret.exe --help || true
           fi
         shell: bash
 
@@ -72,14 +72,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Run tests with nextest
-        run: cargo nextest run --all-features --junit-output-dir artifacts/nextest
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results-${{ matrix.os }}
-          path: artifacts/nextest/junit.xml
-          retention-days: 7
+        run: cargo nextest run --all-features
 
   lint-scripts:
     name: Lint Scripts

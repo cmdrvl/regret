@@ -255,22 +255,22 @@ mod tests {
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[scan]").unwrap();
         writeln!(file, "bootstrap_since = \"60d\"").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "[ranking]").unwrap();
         writeln!(file, "default_since = \"14d\"").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "[ranking.weights]").unwrap();
         writeln!(file, "revert = 20").unwrap();
         writeln!(file, "linked_fix = 12").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "[hotspot]").unwrap();
         writeln!(file, "min_events = 3").unwrap();
         writeln!(file, "min_culprits = 3").unwrap();
         writeln!(file, "min_confidence = 0.5").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "[cache]").unwrap();
         writeln!(file, "wal_checkpoint_threshold_mb = 128").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "[surfaces]").unwrap();
         writeln!(
             file,
@@ -357,7 +357,7 @@ mod tests {
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[unknown_section]").unwrap();
         writeln!(file, "unknown_key = 123").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "[ranking]").unwrap();
         writeln!(file, "unknown_nested = true").unwrap();
 
