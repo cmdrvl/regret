@@ -344,8 +344,41 @@ impl NdjsonStat {
     }
 }
 
+/// NDJSON rank record per §10.2.
+#[derive(Debug, Clone, Serialize)]
+pub struct NdjsonRank {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub culprit_sha: String,
+    pub score: i64,
+    pub events: usize,
+    pub ttr_p50_h: f64,
+    pub culprit_time_utc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface_coverage: Option<f64>,
+}
+
+/// NDJSON evidence record per §10.2.
+#[derive(Debug, Clone, Serialize)]
+pub struct NdjsonEvidence {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub culprit_sha: String,
+    pub evidence_sha: String,
+    pub signal_type: String,
+    pub confidence: f64,
+    pub confidence_reason: String,
+    pub time_to_regret_hours: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bead_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+}
+
 /// Info for NDJSON output.
-pub struct NdjsonInfo {
+pub struct NdjsonInfo<'a> {
     pub tool_version: String,
     pub repo_path: std::path::PathBuf,
     pub repo_basename: String,
@@ -360,6 +393,8 @@ pub struct NdjsonInfo {
     pub max_score: i64,
     pub commits_in_window: usize,
     pub coverage_days: Option<u64>,
+    pub ranked_culprits: &'a [RankedCulprit],
+    pub signals: &'a [SignalRow],
 }
 
 /// Compute a stable repo_id from the repo path (SHA256 hash, first 16 hex chars).
@@ -371,13 +406,14 @@ pub fn compute_repo_id(repo_path: &std::path::Path) -> String {
     hex::encode(&result[..8]) // 16 hex chars
 }
 
-/// Print NDJSON output (meta record + stat records).
+/// Print NDJSON output (meta + stat + rank + evidence records).
 ///
 /// Output goes to stdout as newline-delimited JSON.
+/// Order: meta (one), stat records, rank records, evidence records
 pub fn print_ndjson(info: &NdjsonInfo) {
     let repo_id = compute_repo_id(&info.repo_path);
 
-    // Meta record (exactly one, first)
+    // 1. Meta record (exactly one, first)
     let meta = NdjsonMeta {
         record_type: "meta",
         schema_version: 1,
@@ -394,7 +430,7 @@ pub fn print_ndjson(info: &NdjsonInfo) {
     };
     println!("{}", serde_json::to_string(&meta).expect("serialize meta"));
 
-    // Stat records (fixed order by name)
+    // 2. Stat records (fixed order by name)
     let rate = if info.commits_in_window > 0 {
         (info.events as f64 / info.commits_in_window as f64) * 100.0
     } else {
@@ -414,6 +450,85 @@ pub fn print_ndjson(info: &NdjsonInfo) {
 
     for stat in stats {
         println!("{}", serde_json::to_string(&stat).expect("serialize stat"));
+    }
+
+    // 3. Rank records (sorted by score desc, then SHA)
+    for culprit in info.ranked_culprits {
+        let rank = NdjsonRank {
+            record_type: "rank",
+            culprit_sha: culprit.culprit_sha.clone(),
+            score: culprit.score,
+            events: culprit.events,
+            ttr_p50_h: culprit.ttr_p50_hours,
+            culprit_time_utc: culprit.culprit_date_utc.clone(),
+            surface_coverage: None, // TODO: implement surfaces
+        };
+        println!("{}", serde_json::to_string(&rank).expect("serialize rank"));
+    }
+
+    // 4. Evidence records (grouped by culprit, then evidence_time, then SHA)
+    // Build a map of signals grouped by culprit
+    let mut by_culprit: std::collections::HashMap<&str, Vec<&SignalRow>> =
+        std::collections::HashMap::new();
+    for signal in info.signals {
+        by_culprit
+            .entry(&signal.culprit_sha)
+            .or_default()
+            .push(signal);
+    }
+
+    // Output evidence in culprit order (matching rank order)
+    for culprit in info.ranked_culprits {
+        if let Some(signals) = by_culprit.get(culprit.culprit_sha.as_str()) {
+            // Sort by evidence time, then SHA
+            let mut sorted_signals: Vec<_> = signals.iter().collect();
+            sorted_signals.sort_by(|a, b| {
+                a.culprit_time_utc
+                    .cmp(&b.culprit_time_utc)
+                    .then_with(|| a.evidence_sha.cmp(&b.evidence_sha))
+            });
+
+            for signal in sorted_signals {
+                let evidence = NdjsonEvidence {
+                    record_type: "evidence",
+                    culprit_sha: signal.culprit_sha.clone(),
+                    evidence_sha: signal.evidence_sha.clone(),
+                    signal_type: signal_type_from_weight(signal.weight),
+                    confidence: signal.confidence,
+                    confidence_reason: confidence_reason_from_weight_and_confidence(
+                        signal.weight,
+                        signal.confidence,
+                    ),
+                    time_to_regret_hours: signal.time_to_regret_hours,
+                    work_ref: None,    // TODO: parse from commit
+                    bead_ref: None,    // TODO: parse from commit
+                    session_ref: None, // TODO: parse from commit
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string(&evidence).expect("serialize evidence")
+                );
+            }
+        }
+    }
+}
+
+/// Derive signal type from weight.
+fn signal_type_from_weight(weight: i64) -> String {
+    match weight {
+        10 => "revert".to_string(),
+        8 => "linked_fix".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Derive confidence reason from weight and confidence.
+fn confidence_reason_from_weight_and_confidence(weight: i64, confidence: f64) -> String {
+    match (weight, confidence) {
+        (10, c) if c >= 0.95 => "canonical_revert_line".to_string(),
+        (10, _) => "patch_id_equivalence".to_string(),
+        (8, _) => "explicit_trailer".to_string(),
+        _ => "unknown".to_string(),
     }
 }
 

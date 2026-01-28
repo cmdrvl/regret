@@ -768,6 +768,8 @@ fn run_ranking_output(
             max_score,
             commits_in_window: scanned_commits,
             coverage_days,
+            ranked_culprits: &ranked,
+            signals: &signals,
         });
         return Ok(());
     }
