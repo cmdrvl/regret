@@ -150,6 +150,71 @@ impl Store {
             .context("error: unable to read oldest commit")
     }
 
+    /// Look up a commit by SHA and return its time_utc if found.
+    pub(crate) fn get_commit_time(&self, sha: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT time_utc FROM \"commit\" WHERE sha=?1",
+                [sha],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("error: unable to read commit time")
+    }
+
+    /// Insert detected signals into the database.
+    pub(crate) fn insert_signals(
+        &mut self,
+        ref_name: &str,
+        signals: &[crate::signals::DetectedSignal],
+    ) -> Result<usize> {
+        if signals.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut inserted = 0;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO signal \
+                (ref, type, time_utc, culprit_sha, evidence_sha, weight, confidence, \
+                 time_to_regret_hours, culprit_files_hash, evidence_files_hash) \
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)",
+            )?;
+
+            for signal in signals {
+                stmt.execute(params![
+                    ref_name,
+                    signal.signal_type.as_str(),
+                    signal.evidence_time_utc,
+                    signal.culprit_sha,
+                    signal.evidence_sha,
+                    signal.weight,
+                    signal.confidence,
+                    signal.time_to_regret_hours,
+                ])?;
+                inserted += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// Check if a signal already exists for the given culprit and evidence SHAs.
+    pub(crate) fn signal_exists(&self, culprit_sha: &str, evidence_sha: &str) -> Result<bool> {
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM signal WHERE culprit_sha=?1 AND evidence_sha=?2",
+                [culprit_sha, evidence_sha],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        Ok(exists)
+    }
+
     /// Run database diagnostics and return formatted results
     pub(crate) fn run_diagnostics(&self, deep: bool) -> Result<DiagnosticResults> {
         use rusqlite::OptionalExtension;

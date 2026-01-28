@@ -1,5 +1,6 @@
 use crate::fast_path;
 use crate::shallow;
+use crate::signals::{self, DetectedSignal};
 use crate::store::{CommitRow, Store};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -61,6 +62,8 @@ pub(crate) fn incremental_scan(
     }
 
     let mut rows: Vec<CommitRow> = Vec::new();
+    let mut pending_signals: Vec<(String, String, Vec<String>)> = Vec::new(); // (evidence_sha, evidence_time, culprit_shas)
+
     for oid_result in revwalk {
         let oid = oid_result?;
         let commit = repo.find_commit(oid)?;
@@ -69,6 +72,14 @@ pub(crate) fn incremental_scan(
         let subject = commit.summary().map(truncate_subject);
         let pr_number = subject.as_ref().and_then(|s| parse_pr_number(s));
         let pr_source = pr_number.as_ref().map(|_| "merge_commit".to_string());
+
+        // Detect canonical revert signals in commit body
+        if let Some(body) = commit.body_bytes() {
+            let culprit_shas = signals::detect_canonical_reverts(body);
+            if !culprit_shas.is_empty() {
+                pending_signals.push((oid.to_string(), time_utc.clone(), culprit_shas));
+            }
+        }
 
         rows.push(CommitRow {
             sha: oid.to_string(),
@@ -80,6 +91,35 @@ pub(crate) fn incremental_scan(
     }
 
     store.upsert_commits(&rows)?;
+
+    // Process pending signals now that commits are in the store
+    let mut detected_signals: Vec<DetectedSignal> = Vec::new();
+    for (evidence_sha, evidence_time_utc, culprit_shas) in pending_signals {
+        for culprit_sha in culprit_shas {
+            // Skip if signal already exists
+            if store.signal_exists(&culprit_sha, &evidence_sha)? {
+                continue;
+            }
+
+            // Look up culprit time from store
+            if let Some(culprit_time_utc) = store.get_commit_time(&culprit_sha)? {
+                if let Ok(signal) = signals::create_canonical_revert_signal(
+                    culprit_sha,
+                    &culprit_time_utc,
+                    evidence_sha.clone(),
+                    &evidence_time_utc,
+                ) {
+                    detected_signals.push(signal);
+                }
+            }
+            // If culprit not in store, we skip (it may be outside our scan window)
+        }
+    }
+
+    // Insert detected signals
+    if !detected_signals.is_empty() {
+        store.insert_signals(ref_name, &detected_signals)?;
+    }
     fast_path::set_last_scanned_oids(store, &current_oid.to_string(), &current_oid.to_string())?;
     store.set_meta_bool(META_CACHE_VALID, true)?;
     store.set_meta_bool(META_COVERAGE_VALID, true)?;

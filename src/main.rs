@@ -12,6 +12,7 @@ mod scan;
 mod scan_lock;
 mod selected_branch;
 mod shallow;
+mod signals;
 mod store;
 mod time_window;
 
