@@ -100,13 +100,22 @@ jobs:
         run: |
           $scriptPath = "scripts/install.ps1"
           if (Test-Path $scriptPath) {
-            $errors = $null
-            $null = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$errors)
-            if ($errors) {
-              $errors | ForEach-Object { Write-Error $_ }
+            try {
+              $errors = @()
+              $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                (Resolve-Path $scriptPath).Path,
+                [ref]$null,
+                [ref]$errors
+              )
+              if ($errors.Count -gt 0) {
+                $errors | ForEach-Object { Write-Error $_.ToString() }
+                exit 1
+              }
+              Write-Host "PowerShell syntax OK: $scriptPath"
+            } catch {
+              Write-Error "Failed to parse $scriptPath`: $_"
               exit 1
             }
-            Write-Host "PowerShell syntax OK: $scriptPath"
           } else {
             Write-Host "No install.ps1 found - skipping"
           }

@@ -71,9 +71,11 @@ impl ScanLock {
     fn try_lock_file(file: &File) -> Result<()> {
         use std::os::windows::io::AsRawHandle;
         use winapi::um::fileapi::LockFileEx;
-        use winapi::um::minwinbase::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED};
+        use winapi::um::minwinbase::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED,
+        };
 
-        let handle = file.as_raw_handle();
+        let handle = file.as_raw_handle() as *mut winapi::ctypes::c_void;
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
 
         let result = unsafe {
