@@ -7,6 +7,7 @@ use std::time::Duration as StdDuration;
 
 mod cache_path;
 mod fast_path;
+mod output;
 mod patch_id;
 mod path_validation;
 mod scan;
@@ -626,71 +627,131 @@ fn run(config: Config) -> Result<()> {
         eprintln!("Debug: Resolved Mode = {:?}", mode);
     }
 
-    let writes_cache = match mode {
-        Mode::Init | Mode::Scan => true,
-        Mode::Default => !config.no_scan,
-        Mode::Doctor | Mode::Explain(_) => false,
-    };
-
-    if writes_cache {
-        let mut store = store::Store::open(std::path::Path::new(".regret"))?;
-        let repo_root = std::env::current_dir()?;
-        let selected = selected_branch::ensure_selected_branch(&repo_root, &store)?;
-        fast_path::ensure_meta_defaults(&store, &selected)?;
-        let until_info = time_window::compute_until(&config.until, &repo_root, &selected)?;
-
-        if config.debug {
-            eprintln!("Debug: selected_branch = {}", selected);
-            eprintln!(
-                "Debug: window_until_utc = {} ({:?})",
-                until_info.until.to_rfc3339(),
-                until_info.source
-            );
-        }
-
-        match mode {
-            Mode::Scan => {
-                let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
-                if config.debug {
-                    eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
-                } else {
-                    println!("Scanned {} commits", summary.new_commits);
-                }
-            }
-            Mode::Default if !config.no_scan => {
-                let skip_scan = fast_path::should_skip_scan(&repo_root, &store, &selected)?;
-                if config.debug {
-                    eprintln!("Debug: fast_path_skip_scan = {}", skip_scan);
-                }
-                if !skip_scan {
-                    let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
-                    if config.debug {
-                        eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
-                    }
-                }
-            }
-            _ => {}
-        }
+    // Handle modes that don't need cache
+    match &mode {
+        Mode::Init => return run_init_command(),
+        Mode::Doctor => return run_doctor_command(&config),
+        _ => {}
     }
 
-    // Execute based on resolved mode (with precedence)
-    match mode {
-        Mode::Init => {
-            run_init_command()?;
-        }
-        Mode::Doctor => {
-            run_doctor_command(&config)?;
-        }
+    // All other modes need cache access
+    let mut store = store::Store::open(std::path::Path::new(".regret"))?;
+    let repo_root = std::env::current_dir()?;
+    let selected = selected_branch::ensure_selected_branch(&repo_root, &store)?;
+    fast_path::ensure_meta_defaults(&store, &selected)?;
+    let until_info = time_window::compute_until(&config.until, &repo_root, &selected)?;
+
+    if config.debug {
+        eprintln!("Debug: selected_branch = {}", selected);
+        eprintln!(
+            "Debug: window_until_utc = {} ({:?})",
+            until_info.until.to_rfc3339(),
+            until_info.source
+        );
+    }
+
+    // Track scan results
+    let mut new_commits = 0usize;
+    let mut scan_status = output::ScanStatus::Skipped;
+
+    // Run scan if needed
+    match &mode {
         Mode::Scan => {
-            println!("TODO: Implement scan command (git history scanning)");
+            let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
+            new_commits = summary.new_commits;
+            scan_status = output::ScanStatus::Ran;
+            if config.debug {
+                eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+            }
+        }
+        Mode::Default if !config.no_scan => {
+            let skip_scan = fast_path::should_skip_scan(&repo_root, &store, &selected)?;
+            if config.debug {
+                eprintln!("Debug: fast_path_skip_scan = {}", skip_scan);
+            }
+            if !skip_scan {
+                let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
+                new_commits = summary.new_commits;
+                scan_status = output::ScanStatus::Ran;
+                if config.debug {
+                    eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Execute based on resolved mode
+    match mode {
+        Mode::Init | Mode::Doctor => unreachable!(), // Already handled above
+        Mode::Scan => {
+            // Scan-only mode: just print commit count
+            println!("Scanned {} commits", new_commits);
         }
         Mode::Explain(sha) => {
             println!("TODO: Implement explain mode for SHA: {}", sha);
         }
         Mode::Default => {
-            println!("TODO: Implement default ranking mode");
+            // Default ranking mode: print header and TOP table
+            run_ranking_output(&config, &store, &selected, new_commits, scan_status)?;
         }
     }
+
+    Ok(())
+}
+
+/// Run the default ranking output (header + TOP table).
+fn run_ranking_output(
+    config: &Config,
+    store: &store::Store,
+    selected: &str,
+    new_commits: usize,
+    scan_status: output::ScanStatus,
+) -> Result<()> {
+    // Get repo basename
+    let repo_root = std::env::current_dir()?;
+    let repo_basename = repo_root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Compute coverage days
+    let coverage_days = match store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)? {
+        Some(since_utc) => {
+            if let Ok(since) = DateTime::parse_from_rfc3339(&since_utc) {
+                let now = Utc::now();
+                let duration = now.signed_duration_since(since);
+                Some(duration.num_days() as u64)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    // Get total scanned commits
+    let scanned_commits = store.get_commit_count()?;
+
+    // Print header
+    let header = output::HeaderInfo {
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        repo_basename,
+        selected_branch: selected.to_string(),
+        scan_status,
+        new_commits,
+        scanned_commits,
+        coverage_days,
+    };
+    output::print_header(&header);
+
+    // Get signals and aggregate
+    let signals = store.get_signals_for_ranking(selected)?;
+    let min_confidence = config.min_confidence.unwrap_or(0.0);
+    let ranked = output::aggregate_culprits(&signals, min_confidence);
+
+    // Print TOP table
+    let limit = config.limit.unwrap_or(5) as usize;
+    output::print_top_table(&ranked, limit);
 
     Ok(())
 }

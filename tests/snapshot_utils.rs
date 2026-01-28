@@ -69,17 +69,38 @@ pub fn normalize_output(raw: &str, repo_path: &Path) -> String {
         normalized = normalized.replace(&cache_string, "<CACHE>");
     }
 
+    // Normalize JSON repo_id
     let repo_id_re = Regex::new(r#""repo_id"\s*:\s*"[a-f0-9]{8,}""#).expect("repo_id regex");
     normalized = repo_id_re
         .replace_all(&normalized, "\"repo_id\":\"<REPO_ID>\"")
         .into_owned();
 
+    // Normalize JSON version
     let version_re =
         Regex::new(r#""(tool_version|regret_version)"\s*:\s*"[^"]+""#).expect("version regex");
     normalized = version_re
         .replace_all(&normalized, |caps: &regex::Captures<'_>| {
             format!("\"{}\":\"<VERSION>\"", &caps[1])
         })
+        .into_owned();
+
+    // Normalize header line version (human format): "regret 0.1.0 repo=..." -> "regret <VERSION> repo=..."
+    let header_version_re = Regex::new(r"^regret \d+\.\d+\.\d+").expect("header version regex");
+    normalized = header_version_re
+        .replace(&normalized, "regret <VERSION>")
+        .into_owned();
+
+    // Normalize coverage_days (changes over time): "coverage_days=123" -> "coverage_days=<DAYS>"
+    let coverage_days_re = Regex::new(r"coverage_days=\d+").expect("coverage_days regex");
+    normalized = coverage_days_re
+        .replace_all(&normalized, "coverage_days=<DAYS>")
+        .into_owned();
+
+    // Normalize age column (changes over time): values like "108w", "30d", "5h", "<1h"
+    // Match age values that appear in the table rows (after the 8-char culprit age column position)
+    let age_re = Regex::new(r"\s+(\d+[wdh]|<1h)\s+").expect("age regex");
+    normalized = age_re
+        .replace_all(&normalized, " <AGE> ")
         .into_owned();
 
     normalized

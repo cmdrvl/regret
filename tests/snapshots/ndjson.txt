@@ -1,1 +1,6 @@
-TODO: Implement default ranking mode
+regret <VERSION> repo=repo branch=refs/heads/main scan=ran new_commits=38 scanned_commits=38 coverage_days=<DAYS>
+
+ id  score events  ttr_p50_h     culprit_date_utc      age subject                                                                           conf
+-------------------------------------------------------------------------------------------------------------------------------------------------
+  1     10      1        0.1   2024-01-01 1b39615 <AGE> Change feature B                                                                  0.95
+  2      8      1        0.1   2024-01-01 1d1ceb1 <AGE> Bad change                                                                        0.92

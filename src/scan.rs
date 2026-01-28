@@ -13,7 +13,7 @@ const META_LAST_SCANNED_GRAPH_TIP: &str = "last_scanned_graph_tip";
 const META_LAST_SCANNED_REF_OID: &str = "last_scanned_ref_oid";
 const META_CACHE_VALID: &str = "cache_valid";
 const META_COVERAGE_VALID: &str = "coverage_valid";
-const META_COVERAGE_SINCE_UTC: &str = "coverage_since_utc";
+pub(crate) const META_COVERAGE_SINCE_UTC: &str = "coverage_since_utc";
 const META_COVERAGE_SINCE_OID: &str = "coverage_since_oid";
 const META_IS_SHALLOW: &str = "is_shallow";
 

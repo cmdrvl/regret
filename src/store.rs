@@ -495,6 +495,48 @@ impl Store {
 
         Ok(results)
     }
+
+    /// Get signals with culprit commit info for ranking.
+    /// Returns signals joined with culprit commit data, ordered by culprit time descending.
+    pub(crate) fn get_signals_for_ranking(
+        &self,
+        ref_name: &str,
+    ) -> Result<Vec<crate::output::SignalRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.culprit_sha, s.evidence_sha, s.weight, s.confidence, \
+                    s.time_to_regret_hours, c.time_utc, c.subject \
+             FROM signal s \
+             JOIN \"commit\" c ON c.sha = s.culprit_sha \
+             WHERE s.ref = ?1 \
+             ORDER BY c.time_utc DESC",
+        )?;
+
+        let rows = stmt.query_map([ref_name], |row| {
+            Ok(crate::output::SignalRow {
+                culprit_sha: row.get(0)?,
+                evidence_sha: row.get(1)?,
+                weight: row.get(2)?,
+                confidence: row.get(3)?,
+                time_to_regret_hours: row.get(4)?,
+                culprit_time_utc: row.get(5)?,
+                culprit_subject: row.get(6)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Get the total number of commits scanned.
+    pub(crate) fn get_commit_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM \"commit\"", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
 }
 
 fn ensure_db_file(path: &Path) -> Result<()> {
