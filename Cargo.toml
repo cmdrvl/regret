@@ -1,6 +1,6 @@
 [package]
 name = "regret"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["CMD+RVL <engineering@cmdrvl.com>"]
 description = "Single-verb, local-first, deterministic CLI that mines high-precision regret signals from git history"
