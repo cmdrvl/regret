@@ -729,10 +729,8 @@ fn run_ranking_output(
 
     // Get coverage info
     let coverage_since_utc = store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)?;
-    let coverage_valid_str = store.get_meta_value("coverage_valid")?;
-    let coverage_valid = coverage_valid_str.as_deref() == Some("1");
-    let cache_valid_str = store.get_meta_value("cache_valid")?;
-    let cache_valid = cache_valid_str.as_deref() == Some("1");
+    let coverage_valid = store.get_meta_bool("coverage_valid")?.unwrap_or(false);
+    let cache_valid = store.get_meta_bool("cache_valid")?.unwrap_or(false);
 
     // Compute coverage days
     let coverage_days = match &coverage_since_utc {
@@ -932,10 +930,8 @@ fn run_explain_output(
 
     // Get coverage info
     let coverage_since_utc = store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)?;
-    let coverage_valid_str = store.get_meta_value("coverage_valid")?;
-    let coverage_valid = coverage_valid_str.as_deref() == Some("1");
-    let cache_valid_str = store.get_meta_value("cache_valid")?;
-    let cache_valid = cache_valid_str.as_deref() == Some("1");
+    let coverage_valid = store.get_meta_bool("coverage_valid")?.unwrap_or(false);
+    let cache_valid = store.get_meta_bool("cache_valid")?.unwrap_or(false);
 
     // Get signals for this culprit
     let signals = store.get_signals_for_culprit(selected, &full_sha)?;

@@ -6,5 +6,3 @@ regret <VERSION> repo=repo branch=refs/heads/main scan=ran new_commits=38 scanne
   2      8      1        0.1   2024-01-01 1d1ceb1 <AGE> Bad change                                                                        0.92
 
 RATE events_per_100_commits=5.26 events=2 commits=38
-COVERAGE status=invalid coverage_since_utc=2024-01-01T00:00:00+00:00 coverage_valid=0
-NEXT: regret --scan --all
