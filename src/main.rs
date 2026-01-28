@@ -6,10 +6,12 @@ use std::process;
 use std::time::Duration as StdDuration;
 
 mod cache_path;
+mod config_file;
 mod fast_path;
 mod output;
 mod patch_id;
 mod path_validation;
+mod policy;
 mod scan;
 mod scan_lock;
 mod selected_branch;
@@ -689,11 +691,18 @@ fn run(config: Config) -> Result<()> {
             println!("Scanned {} commits", new_commits);
         }
         Mode::Explain(sha) => {
-            println!("TODO: Implement explain mode for SHA: {}", sha);
+            run_explain_output(&config, &store, &selected, &sha, &until_info)?;
         }
         Mode::Default => {
             // Default ranking mode: print output (NDJSON or human-readable)
-            run_ranking_output(&config, &store, &selected, new_commits, scan_status, &until_info)?;
+            run_ranking_output(
+                &config,
+                &store,
+                &selected,
+                new_commits,
+                scan_status,
+                &until_info,
+            )?;
         }
     }
 
@@ -749,6 +758,26 @@ fn run_ranking_output(
     let events: usize = ranked.iter().map(|c| c.events).sum();
     let max_score = ranked.first().map(|c| c.score).unwrap_or(0);
 
+    // Compute events_per_100_commits for policy evaluation
+    let events_per_100_commits = if scanned_commits > 0 {
+        (events as f64 / scanned_commits as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Parse --fail-if expression early to catch parse errors (exit 2)
+    let policy_expr = if let Some(ref fail_if) = config.fail_if {
+        match policy::parse_expression(fail_if) {
+            Ok(expr) => Some(expr),
+            Err(e) => {
+                eprintln!("error: invalid --fail-if expression: {}", e);
+                process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+
     // NDJSON output mode
     if config.ndjson {
         let window_until_source = format!("{:?}", until_info.source);
@@ -771,6 +800,18 @@ fn run_ranking_output(
             ranked_culprits: &ranked,
             signals: &signals,
         });
+
+        // Evaluate policy after output (still exits 3 on violation)
+        if let Some(expr) = policy_expr {
+            let values = policy::MetricValues {
+                regret_events: events,
+                max_score,
+                events_per_100_commits,
+            };
+            if expr.evaluate(&values) {
+                process::exit(3);
+            }
+        }
         return Ok(());
     }
 
@@ -841,6 +882,81 @@ fn run_ranking_output(
             coverage_days,
             reason,
         });
+    }
+
+    // Evaluate policy after all output (exit 3 on violation)
+    if let Some(expr) = policy_expr {
+        let values = policy::MetricValues {
+            regret_events: events,
+            max_score,
+            events_per_100_commits,
+        };
+        if expr.evaluate(&values) {
+            process::exit(3);
+        }
+    }
+
+    Ok(())
+}
+
+/// Run explain mode for a specific SHA.
+fn run_explain_output(
+    config: &Config,
+    store: &store::Store,
+    selected: &str,
+    sha_prefix: &str,
+    until_info: &time_window::UntilInfo,
+) -> Result<()> {
+    // Resolve SHA prefix to full SHA
+    let full_sha = match store.resolve_sha_prefix(sha_prefix)? {
+        Some(sha) => sha,
+        None => {
+            // Check if ambiguous or not found
+            // Try to get any matches to determine if ambiguous
+            eprintln!(
+                "error: SHA '{}' not found or ambiguous in cache",
+                sha_prefix
+            );
+            process::exit(1);
+        }
+    };
+
+    // Get repo info
+    let repo_root = std::env::current_dir()?;
+    let repo_basename = repo_root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Get coverage info
+    let coverage_since_utc = store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)?;
+    let coverage_valid_str = store.get_meta_value("coverage_valid")?;
+    let coverage_valid = coverage_valid_str.as_deref() == Some("1");
+    let cache_valid_str = store.get_meta_value("cache_valid")?;
+    let cache_valid = cache_valid_str.as_deref() == Some("1");
+
+    // Get signals for this culprit
+    let signals = store.get_signals_for_culprit(selected, &full_sha)?;
+
+    // Build explain info
+    let explain_info = output::ExplainInfo {
+        culprit_sha: full_sha.clone(),
+        signals: &signals,
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        repo_path: repo_root,
+        repo_basename,
+        selected_branch: selected.to_string(),
+        window_until_utc: until_info.until.to_rfc3339(),
+        window_until_source: format!("{:?}", until_info.source),
+        coverage_since_utc,
+        coverage_valid,
+        cache_valid,
+    };
+
+    if config.ndjson {
+        output::print_explain_ndjson(&explain_info);
+    } else {
+        output::print_explain_human(&explain_info);
     }
 
     Ok(())

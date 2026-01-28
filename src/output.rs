@@ -164,7 +164,7 @@ pub fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let len = values.len();
-    if len % 2 == 0 {
+    if len.is_multiple_of(2) {
         (values[len / 2 - 1] + values[len / 2]) / 2.0
     } else {
         values[len / 2]
@@ -548,10 +548,7 @@ pub struct SignalRow {
 ///
 /// Scoring per §9.1: score = Σ(weight) for signals in window with confidence >= min_confidence
 /// Sorting: score desc, then culprit SHA (lexical)
-pub fn aggregate_culprits(
-    signals: &[SignalRow],
-    min_confidence: f64,
-) -> Vec<RankedCulprit> {
+pub fn aggregate_culprits(signals: &[SignalRow], min_confidence: f64) -> Vec<RankedCulprit> {
     use std::collections::HashMap;
 
     // Group signals by culprit_sha
@@ -617,6 +614,192 @@ pub fn aggregate_culprits(
     culprits
 }
 
+// =============================================================================
+// Explain Mode Output (§10.3)
+// =============================================================================
+
+/// Info for explain mode output.
+pub struct ExplainInfo<'a> {
+    pub culprit_sha: String,
+    pub signals: &'a [SignalRow],
+    /// For NDJSON mode
+    pub tool_version: String,
+    pub repo_path: std::path::PathBuf,
+    pub repo_basename: String,
+    pub selected_branch: String,
+    pub window_until_utc: String,
+    pub window_until_source: String,
+    pub coverage_since_utc: Option<String>,
+    pub coverage_valid: bool,
+    pub cache_valid: bool,
+}
+
+/// Print NO_SIGNALS message for non-culprit SHA.
+pub fn print_no_signals(sha: &str) {
+    println!("NO_SIGNALS culprit=sha:{}", sha);
+}
+
+/// Print NO_SIGNALS in NDJSON format.
+pub fn print_no_signals_ndjson(info: &ExplainInfo) {
+    let repo_id = compute_repo_id(&info.repo_path);
+
+    // Just meta record, no rank/evidence
+    let meta = NdjsonMeta {
+        record_type: "meta",
+        schema_version: 1,
+        tool_version: info.tool_version.clone(),
+        repo_id,
+        repo_basename: info.repo_basename.clone(),
+        selected_branch: info.selected_branch.clone(),
+        window_since_utc: None,
+        window_until_utc: info.window_until_utc.clone(),
+        window_until_source: info.window_until_source.clone(),
+        coverage_since_utc: info.coverage_since_utc.clone(),
+        coverage_valid: info.coverage_valid,
+        cache_valid: info.cache_valid,
+    };
+    println!("{}", serde_json::to_string(&meta).expect("serialize meta"));
+}
+
+/// Print human-readable explain output for a culprit.
+pub fn print_explain_human(info: &ExplainInfo) {
+    if info.signals.is_empty() {
+        print_no_signals(&info.culprit_sha);
+        return;
+    }
+
+    // Aggregate for the culprit
+    let ranked = aggregate_culprits(info.signals, 0.0);
+    let culprit = &ranked[0];
+
+    // Short SHA (7 chars)
+    let short_sha = if info.culprit_sha.len() >= 7 {
+        &info.culprit_sha[..7]
+    } else {
+        &info.culprit_sha
+    };
+
+    // CULPRIT line
+    println!(
+        "CULPRIT sha:{} score={} events={} ttr_p50_h={:.1} culprit_date_utc={}",
+        short_sha, culprit.score, culprit.events, culprit.ttr_p50_hours, culprit.culprit_date_utc
+    );
+
+    // Subject (truncated to 120 chars)
+    let subject = info.signals[0]
+        .culprit_subject
+        .clone()
+        .unwrap_or_else(|| "(no subject)".to_string());
+    let subject_trunc = if subject.len() > 120 {
+        format!("{}...", &subject[..117])
+    } else {
+        subject
+    };
+    println!("  subject: {}", subject_trunc);
+
+    // EVIDENCE section
+    println!();
+    println!("EVIDENCE (sorted by evidence_time desc):");
+    println!(
+        "  {:<12} {:<12} {:>20} {:>8} {:>6} confidence_reason",
+        "type", "evidence_sha", "evidence_date_utc", "ttr_h", "conf"
+    );
+
+    // Sort signals by evidence time desc (we need to get evidence time from store)
+    // For now, just print in the order we have (which is by evidence_time from the query)
+    for signal in info.signals {
+        let signal_type = signal_type_from_weight(signal.weight);
+        let short_evidence = if signal.evidence_sha.len() >= 7 {
+            &signal.evidence_sha[..7]
+        } else {
+            &signal.evidence_sha
+        };
+        let reason = confidence_reason_from_weight_and_confidence(signal.weight, signal.confidence);
+
+        // We don't have evidence_date_utc in SignalRow, use culprit_time + ttr for now
+        // TODO: Add evidence_time_utc to SignalRow
+        println!(
+            "  {:<12} {:<12} {:>20} {:>8.1} {:>6.2} {}",
+            signal_type,
+            short_evidence,
+            "-",
+            signal.time_to_regret_hours,
+            signal.confidence,
+            reason
+        );
+    }
+
+    // SURFACES section - placeholder for now (after E5)
+    // println!();
+    // println!("SURFACES (top 5 by score):");
+    // println!("  (not yet implemented)");
+}
+
+/// Print NDJSON explain output for a culprit.
+pub fn print_explain_ndjson(info: &ExplainInfo) {
+    if info.signals.is_empty() {
+        print_no_signals_ndjson(info);
+        return;
+    }
+
+    let repo_id = compute_repo_id(&info.repo_path);
+
+    // 1. Meta record
+    let meta = NdjsonMeta {
+        record_type: "meta",
+        schema_version: 1,
+        tool_version: info.tool_version.clone(),
+        repo_id,
+        repo_basename: info.repo_basename.clone(),
+        selected_branch: info.selected_branch.clone(),
+        window_since_utc: None,
+        window_until_utc: info.window_until_utc.clone(),
+        window_until_source: info.window_until_source.clone(),
+        coverage_since_utc: info.coverage_since_utc.clone(),
+        coverage_valid: info.coverage_valid,
+        cache_valid: info.cache_valid,
+    };
+    println!("{}", serde_json::to_string(&meta).expect("serialize meta"));
+
+    // 2. One rank record (NO stat records per spec)
+    let ranked = aggregate_culprits(info.signals, 0.0);
+    if let Some(culprit) = ranked.first() {
+        let rank = NdjsonRank {
+            record_type: "rank",
+            culprit_sha: culprit.culprit_sha.clone(),
+            score: culprit.score,
+            events: culprit.events,
+            ttr_p50_h: culprit.ttr_p50_hours,
+            culprit_time_utc: culprit.culprit_date_utc.clone(),
+            surface_coverage: None,
+        };
+        println!("{}", serde_json::to_string(&rank).expect("serialize rank"));
+    }
+
+    // 3. All evidence records for this culprit
+    for signal in info.signals {
+        let evidence = NdjsonEvidence {
+            record_type: "evidence",
+            culprit_sha: signal.culprit_sha.clone(),
+            evidence_sha: signal.evidence_sha.clone(),
+            signal_type: signal_type_from_weight(signal.weight),
+            confidence: signal.confidence,
+            confidence_reason: confidence_reason_from_weight_and_confidence(
+                signal.weight,
+                signal.confidence,
+            ),
+            time_to_regret_hours: signal.time_to_regret_hours,
+            work_ref: None,
+            bead_ref: None,
+            session_ref: None,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&evidence).expect("serialize evidence")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,7 +807,10 @@ mod tests {
     #[test]
     fn test_truncate_subject() {
         assert_eq!(truncate_subject("short", 80), "short");
-        assert_eq!(truncate_subject("a".repeat(80).as_str(), 80), "a".repeat(80));
+        assert_eq!(
+            truncate_subject("a".repeat(80).as_str(), 80),
+            "a".repeat(80)
+        );
 
         let long = "a".repeat(100);
         let truncated = truncate_subject(&long, 80);
@@ -687,17 +873,15 @@ mod tests {
 
     #[test]
     fn test_aggregate_filters_by_confidence() {
-        let signals = vec![
-            SignalRow {
-                culprit_sha: "aaaa".to_string(),
-                evidence_sha: "bbbb".to_string(),
-                weight: 10,
-                confidence: 0.85,
-                time_to_regret_hours: 24.0,
-                culprit_time_utc: "2026-01-27T10:00:00Z".to_string(),
-                culprit_subject: Some("commit A".to_string()),
-            },
-        ];
+        let signals = vec![SignalRow {
+            culprit_sha: "aaaa".to_string(),
+            evidence_sha: "bbbb".to_string(),
+            weight: 10,
+            confidence: 0.85,
+            time_to_regret_hours: 24.0,
+            culprit_time_utc: "2026-01-27T10:00:00Z".to_string(),
+            culprit_subject: Some("commit A".to_string()),
+        }];
 
         // With min_confidence=0.90, this signal should be filtered out
         let ranked = aggregate_culprits(&signals, 0.90);

@@ -50,6 +50,7 @@ pub enum ConfidenceReason {
 }
 
 impl ConfidenceReason {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             ConfidenceReason::CanonicalRevertLine => "canonical_revert_line",
@@ -61,6 +62,7 @@ impl ConfidenceReason {
 
 /// A detected signal before storage
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DetectedSignal {
     pub signal_type: SignalType,
     pub culprit_sha: String,
@@ -87,9 +89,9 @@ static LINKED_FIX_TRAILER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Regex for evidence candidate subjects: contains "revert" or "rollback" (case-insensitive).
 /// Per §8.2 A): Evidence candidates are commits whose SUBJECT contains "revert" or "rollback".
-static EVIDENCE_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)revert|rollback").expect("invalid regex")
-});
+#[allow(dead_code)]
+static EVIDENCE_CANDIDATE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)revert|rollback").expect("invalid regex"));
 
 /// Detect canonical revert lines in a commit body.
 ///
@@ -160,8 +162,7 @@ pub fn create_linked_fix_signal(
     evidence_sha: String,
     evidence_time_utc: &str,
 ) -> Result<DetectedSignal> {
-    let time_to_regret_hours =
-        calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
+    let time_to_regret_hours = calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
 
     Ok(DetectedSignal {
         signal_type: SignalType::LinkedFix,
@@ -179,6 +180,7 @@ pub fn create_linked_fix_signal(
 ///
 /// Per §8.2 A): Evidence candidates are commits whose SUBJECT contains "revert" or "rollback"
 /// (ASCII case-insensitive byte scan).
+#[allow(dead_code)]
 pub fn is_evidence_candidate(subject: &[u8]) -> bool {
     EVIDENCE_CANDIDATE_REGEX.is_match(subject)
 }
@@ -192,8 +194,7 @@ pub fn create_patch_id_revert_signal(
     evidence_sha: String,
     evidence_time_utc: &str,
 ) -> Result<DetectedSignal> {
-    let time_to_regret_hours =
-        calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
+    let time_to_regret_hours = calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
 
     Ok(DetectedSignal {
         signal_type: SignalType::Revert,
@@ -233,8 +234,7 @@ pub fn create_canonical_revert_signal(
     evidence_sha: String,
     evidence_time_utc: &str,
 ) -> Result<DetectedSignal> {
-    let time_to_regret_hours =
-        calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
+    let time_to_regret_hours = calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
 
     Ok(DetectedSignal {
         signal_type: SignalType::Revert,
@@ -257,10 +257,7 @@ mod tests {
         let body = b"Revert \"Add feature X\"\n\nThis reverts commit abc1234567890def1234567890abc123456789de.\n";
         let culprits = detect_canonical_reverts(body);
         assert_eq!(culprits.len(), 1);
-        assert_eq!(
-            culprits[0],
-            "abc1234567890def1234567890abc123456789de"
-        );
+        assert_eq!(culprits[0], "abc1234567890def1234567890abc123456789de");
     }
 
     #[test]
@@ -269,10 +266,7 @@ mod tests {
         let culprits = detect_canonical_reverts(body);
         assert_eq!(culprits.len(), 1);
         // Should be lowercased
-        assert_eq!(
-            culprits[0],
-            "abc1234567890def1234567890abc123456789de"
-        );
+        assert_eq!(culprits[0], "abc1234567890def1234567890abc123456789de");
     }
 
     #[test]

@@ -28,6 +28,7 @@ impl PatchId {
     }
 
     /// Convert to hex string (40 chars).
+    #[allow(dead_code)]
     pub fn to_hex(&self) -> String {
         self.0.iter().map(|b| format!("{:02x}", b)).collect()
     }

@@ -561,6 +561,81 @@ impl Store {
 
         Ok((reverts as usize, linked_fix as usize))
     }
+
+    /// Resolve a SHA prefix to full SHA. Returns None if not found or ambiguous.
+    pub(crate) fn resolve_sha_prefix(&self, prefix: &str) -> Result<Option<String>> {
+        let pattern = format!("{}%", prefix);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT sha FROM \"commit\" WHERE sha LIKE ?1")?;
+
+        let rows: Vec<String> = stmt
+            .query_map([&pattern], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        match rows.len() {
+            0 => Ok(None), // Not found
+            1 => Ok(Some(rows.into_iter().next().unwrap())),
+            _ => Ok(None), // Ambiguous
+        }
+    }
+
+    /// Get signals for a specific culprit SHA.
+    pub(crate) fn get_signals_for_culprit(
+        &self,
+        ref_name: &str,
+        culprit_sha: &str,
+    ) -> Result<Vec<crate::output::SignalRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.culprit_sha, s.evidence_sha, s.weight, s.confidence, \
+                    s.time_to_regret_hours, c.time_utc, c.subject \
+             FROM signal s \
+             JOIN \"commit\" c ON c.sha = s.culprit_sha \
+             WHERE s.ref = ?1 AND s.culprit_sha = ?2 \
+             ORDER BY s.time_utc DESC, s.evidence_sha",
+        )?;
+
+        let rows = stmt.query_map([ref_name, culprit_sha], |row| {
+            Ok(crate::output::SignalRow {
+                culprit_sha: row.get(0)?,
+                evidence_sha: row.get(1)?,
+                weight: row.get(2)?,
+                confidence: row.get(3)?,
+                time_to_regret_hours: row.get(4)?,
+                culprit_time_utc: row.get(5)?,
+                culprit_subject: row.get(6)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Get commit info by SHA.
+    #[allow(dead_code)]
+    pub(crate) fn get_commit(&self, sha: &str) -> Result<Option<CommitRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT sha, time_utc, subject, pr_number, pr_source FROM \"commit\" WHERE sha = ?1",
+                [sha],
+                |row| {
+                    Ok(CommitRow {
+                        sha: row.get(0)?,
+                        time_utc: row.get(1)?,
+                        subject: row.get(2)?,
+                        pr_number: row.get(3)?,
+                        pr_source: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
 }
 
 fn ensure_db_file(path: &Path) -> Result<()> {
