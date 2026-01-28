@@ -253,10 +253,7 @@ fn parse_args() -> Result<Config> {
 
     let matches = match app.try_get_matches() {
         Ok(matches) => matches,
-        Err(e) => {
-            eprintln!("{}", e);
-            process::exit(2);
-        }
+        Err(e) => e.exit(), // Exits with 0 for --help/--version, non-zero for errors
     };
 
     let config = Config {

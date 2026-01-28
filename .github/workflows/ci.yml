@@ -107,9 +107,9 @@ jobs:
       - name: Lint install.ps1 (if exists)
         run: |
           if [ -f scripts/install.ps1 ]; then
-            pwsh -Command "Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Warning,Error"
+            pwsh -Command "Import-Module PSScriptAnalyzer; Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Warning,Error"
           elif [ -f install.ps1 ]; then
-            pwsh -Command "Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error"
+            pwsh -Command "Import-Module PSScriptAnalyzer; Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error"
           else
             echo "No install.ps1 found - skipping PSScriptAnalyzer"
           fi
