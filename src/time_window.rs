@@ -12,6 +12,16 @@ pub(crate) enum UntilSource {
     WallClock,
 }
 
+impl UntilSource {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            UntilSource::Flag => "flag",
+            UntilSource::GithubActionsHeadCommitterTime => "github_actions_head_committer_time",
+            UntilSource::WallClock => "wall_clock",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct UntilInfo {
     pub(crate) until: DateTime<Utc>,

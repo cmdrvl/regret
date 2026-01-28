@@ -138,6 +138,29 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn reset_for_full_scan(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM signal", [])?;
+        tx.execute("DELETE FROM fileset", [])?;
+        tx.execute("DELETE FROM file", [])?;
+        tx.execute("DELETE FROM \"commit\"", [])?;
+
+        for key in [
+            "last_scanned_graph_tip",
+            "last_scanned_ref_oid",
+            "cache_valid",
+            "coverage_valid",
+            "coverage_since_utc",
+            "coverage_since_oid",
+            "is_shallow",
+        ] {
+            tx.execute("DELETE FROM meta WHERE key=?1", [key])?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn get_oldest_commit(&self) -> Result<Option<(String, String)>> {
         self.conn
             .query_row(
@@ -235,9 +258,10 @@ impl Store {
             .query_row(
                 "SELECT patch_id FROM \"commit\" WHERE sha=?1",
                 [sha],
-                |row| row.get(0),
+                |row| row.get::<_, Option<Vec<u8>>>(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
 
         match result {
             Some(bytes) if bytes.len() == 20 => {
@@ -266,9 +290,10 @@ impl Store {
             .query_row(
                 "SELECT patch_id_rev FROM \"commit\" WHERE sha=?1",
                 [sha],
-                |row| row.get(0),
+                |row| row.get::<_, Option<Vec<u8>>>(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
 
         match result {
             Some(bytes) if bytes.len() == 20 => {
@@ -500,33 +525,51 @@ impl Store {
     pub(crate) fn get_signals_for_ranking(
         &self,
         ref_name: &str,
+        since_utc: Option<&str>,
+        until_utc: &str,
     ) -> Result<Vec<crate::output::SignalRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT s.culprit_sha, s.evidence_sha, s.weight, s.confidence, \
-                    s.time_to_regret_hours, c.time_utc, c.subject \
-             FROM signal s \
-             JOIN \"commit\" c ON c.sha = s.culprit_sha \
-             WHERE s.ref = ?1 \
-             ORDER BY c.time_utc DESC",
-        )?;
-
-        let rows = stmt.query_map([ref_name], |row| {
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(crate::output::SignalRow {
                 culprit_sha: row.get(0)?,
                 evidence_sha: row.get(1)?,
-                weight: row.get(2)?,
-                confidence: row.get(3)?,
-                time_to_regret_hours: row.get(4)?,
-                culprit_time_utc: row.get(5)?,
-                culprit_subject: row.get(6)?,
+                evidence_time_utc: row.get(2)?,
+                weight: row.get(3)?,
+                confidence: row.get(4)?,
+                time_to_regret_hours: row.get(5)?,
+                culprit_time_utc: row.get(6)?,
+                culprit_subject: row.get(7)?,
             })
-        })?;
+        };
 
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
+        if let Some(since) = since_utc {
+            let sql = "SELECT s.culprit_sha, s.evidence_sha, s.time_utc, s.weight, s.confidence, \
+                            s.time_to_regret_hours, c.time_utc, c.subject \
+                       FROM signal s \
+                       JOIN \"commit\" c ON c.sha = s.culprit_sha \
+                       WHERE s.ref = ?1 AND s.time_utc >= ?2 AND s.time_utc <= ?3 \
+                       ORDER BY c.time_utc DESC";
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params![ref_name, since, until_utc], map_row)?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
+        } else {
+            let sql = "SELECT s.culprit_sha, s.evidence_sha, s.time_utc, s.weight, s.confidence, \
+                            s.time_to_regret_hours, c.time_utc, c.subject \
+                       FROM signal s \
+                       JOIN \"commit\" c ON c.sha = s.culprit_sha \
+                       WHERE s.ref = ?1 AND s.time_utc <= ?2 \
+                       ORDER BY c.time_utc DESC";
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params![ref_name, until_utc], map_row)?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
         }
-        Ok(results)
     }
 
     /// Get the total number of commits scanned.
@@ -534,6 +577,28 @@ impl Store {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM \"commit\"", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
+    /// Get the number of commits in the ranking window.
+    pub(crate) fn get_commit_count_in_window(
+        &self,
+        since_utc: Option<&str>,
+        until_utc: &str,
+    ) -> Result<usize> {
+        let count: i64 = if let Some(since) = since_utc {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM \"commit\" WHERE time_utc >= ?1 AND time_utc <= ?2",
+                rusqlite::params![since, until_utc],
+                |row| row.get(0),
+            )?
+        } else {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM \"commit\" WHERE time_utc <= ?1",
+                rusqlite::params![until_utc],
+                |row| row.get(0),
+            )?
+        };
         Ok(count as usize)
     }
 
@@ -585,33 +650,57 @@ impl Store {
         &self,
         ref_name: &str,
         culprit_sha: &str,
+        since_utc: Option<&str>,
+        until_utc: &str,
     ) -> Result<Vec<crate::output::SignalRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT s.culprit_sha, s.evidence_sha, s.weight, s.confidence, \
-                    s.time_to_regret_hours, c.time_utc, c.subject \
-             FROM signal s \
-             JOIN \"commit\" c ON c.sha = s.culprit_sha \
-             WHERE s.ref = ?1 AND s.culprit_sha = ?2 \
-             ORDER BY s.time_utc DESC, s.evidence_sha",
-        )?;
-
-        let rows = stmt.query_map([ref_name, culprit_sha], |row| {
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(crate::output::SignalRow {
                 culprit_sha: row.get(0)?,
                 evidence_sha: row.get(1)?,
-                weight: row.get(2)?,
-                confidence: row.get(3)?,
-                time_to_regret_hours: row.get(4)?,
-                culprit_time_utc: row.get(5)?,
-                culprit_subject: row.get(6)?,
+                evidence_time_utc: row.get(2)?,
+                weight: row.get(3)?,
+                confidence: row.get(4)?,
+                time_to_regret_hours: row.get(5)?,
+                culprit_time_utc: row.get(6)?,
+                culprit_subject: row.get(7)?,
             })
-        })?;
+        };
 
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
+        if let Some(since) = since_utc {
+            let sql = "SELECT s.culprit_sha, s.evidence_sha, s.time_utc, s.weight, s.confidence, \
+                            s.time_to_regret_hours, c.time_utc, c.subject \
+                       FROM signal s \
+                       JOIN \"commit\" c ON c.sha = s.culprit_sha \
+                       WHERE s.ref = ?1 AND s.culprit_sha = ?2 \
+                         AND s.time_utc >= ?3 AND s.time_utc <= ?4 \
+                       ORDER BY s.time_utc DESC, s.evidence_sha";
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![ref_name, culprit_sha, since, until_utc],
+                map_row,
+            )?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
+        } else {
+            let sql = "SELECT s.culprit_sha, s.evidence_sha, s.time_utc, s.weight, s.confidence, \
+                            s.time_to_regret_hours, c.time_utc, c.subject \
+                       FROM signal s \
+                       JOIN \"commit\" c ON c.sha = s.culprit_sha \
+                       WHERE s.ref = ?1 AND s.culprit_sha = ?2 \
+                         AND s.time_utc <= ?3 \
+                       ORDER BY s.time_utc DESC, s.evidence_sha";
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows =
+                stmt.query_map(rusqlite::params![ref_name, culprit_sha, until_utc], map_row)?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
         }
-        Ok(results)
     }
 
     /// Get commit info by SHA.

@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
-use clap::{value_parser, Arg, Command};
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
+use clap::{value_parser, Arg, ArgMatches, Command};
 use regex::Regex;
 use std::process;
 use std::time::Duration as StdDuration;
@@ -37,6 +37,15 @@ impl Duration {
             Duration::Hours(h) => StdDuration::from_secs(h * 3600),
             Duration::Days(d) => StdDuration::from_secs(d * 24 * 3600),
             Duration::Weeks(w) => StdDuration::from_secs(w * 7 * 24 * 3600),
+        }
+    }
+
+    /// Convert to chrono duration for date arithmetic.
+    pub fn to_chrono_duration(&self) -> ChronoDuration {
+        match self {
+            Duration::Hours(h) => ChronoDuration::hours(*h as i64),
+            Duration::Days(d) => ChronoDuration::days(*d as i64),
+            Duration::Weeks(w) => ChronoDuration::weeks(*w as i64),
         }
     }
 }
@@ -153,6 +162,7 @@ fn resolve_mode(config: &Config) -> Mode {
 pub struct Config {
     // Core modes
     pub init: bool,
+    pub force: bool,
     pub scan: bool,
     pub all: bool,
     pub doctor: bool,
@@ -179,9 +189,57 @@ pub struct Config {
     pub sha: Option<String>,
 }
 
-/// Parse command line arguments into Config
-fn parse_args() -> Result<Config> {
-    let app = Command::new("regret")
+#[derive(Debug, Clone)]
+struct WindowInfo {
+    since: Option<DateTime<Utc>>,
+    until: DateTime<Utc>,
+}
+
+fn parse_duration_config(value: &str, field: &str) -> Result<Duration> {
+    parse_duration(value).with_context(|| format!("Invalid config duration for {}", field))
+}
+
+fn compute_since(until: DateTime<Utc>, duration: &Duration) -> DateTime<Utc> {
+    until - duration.to_chrono_duration()
+}
+
+fn compute_window_days(since: Option<DateTime<Utc>>, until: DateTime<Utc>) -> Option<u64> {
+    since.map(|start| {
+        let duration = until.signed_duration_since(start);
+        duration.num_days().max(0) as u64
+    })
+}
+
+fn compute_window_hint(since: Option<DateTime<Utc>>, until: DateTime<Utc>) -> Option<String> {
+    let start = since?;
+    let duration = until.signed_duration_since(start);
+    let hours = duration.num_hours();
+    if hours <= 0 {
+        return None;
+    }
+
+    let hours_per_day = 24;
+    let hours_per_week = hours_per_day * 7;
+    if hours % hours_per_week == 0 {
+        Some(format!("{}w", hours / hours_per_week))
+    } else if hours % hours_per_day == 0 {
+        Some(format!("{}d", hours / hours_per_day))
+    } else {
+        Some(format!("{}h", hours))
+    }
+}
+
+fn format_error_message(err: &anyhow::Error) -> String {
+    let message = err.to_string();
+    if message.starts_with("error:") {
+        message
+    } else {
+        format!("error: {}", message)
+    }
+}
+
+fn build_cli() -> Command {
+    Command::new("regret")
         .version(env!("CARGO_PKG_VERSION"))
         .author("CMD+RVL <engineering@cmdrvl.com>")
         .about("Single-verb, local-first, deterministic CLI that mines high-precision regret signals from git history")
@@ -193,13 +251,20 @@ fn parse_args() -> Result<Config> {
             .long("init")
             .help("Install commit templates and configuration")
             .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("force")
+            .long("force")
+            .help("Overwrite existing files when running --init")
+            .requires("init")
+            .action(clap::ArgAction::SetTrue))
         .arg(Arg::new("scan")
             .long("scan")
             .help("Scan-only mode (no ranking output)")
+            .conflicts_with("ndjson")
             .action(clap::ArgAction::SetTrue))
         .arg(Arg::new("all")
             .long("all")
-            .help("Scan entire git history (not just since last scan)")
+            .help("Scan full history and rank over all evidence (<= --until)")
+            .conflicts_with("no-scan")
             .action(clap::ArgAction::SetTrue))
         .arg(Arg::new("doctor")
             .long("doctor")
@@ -212,15 +277,16 @@ fn parse_args() -> Result<Config> {
         .arg(Arg::new("no-scan")
             .long("no-scan")
             .help("Skip scanning; use existing cache only")
+            .conflicts_with("scan")
             .action(clap::ArgAction::SetTrue))
         .arg(Arg::new("since")
             .long("since")
-            .help("Scan commits since this duration ago (e.g., 30d, 2w, 12h)")
+            .help("Rank evidence since this duration ago (e.g., 30d, 2w, 12h)")
             .value_name("DURATION")
             .value_parser(parse_duration))
         .arg(Arg::new("until")
             .long("until")
-            .help("Scan commits until this date (YYYY-MM-DD or RFC3339)")
+            .help("Set ranking window end (YYYY-MM-DD or RFC3339)")
             .value_name("DATE")
             .value_parser(parse_date))
         .arg(Arg::new("limit")
@@ -236,10 +302,12 @@ fn parse_args() -> Result<Config> {
         .arg(Arg::new("table")
             .long("table")
             .help("Force table output format (default)")
+            .conflicts_with("ndjson")
             .action(clap::ArgAction::SetTrue))
         .arg(Arg::new("ndjson")
             .long("ndjson")
             .help("Output as newline-delimited JSON (robot mode)")
+            .conflicts_with("table")
             .action(clap::ArgAction::SetTrue))
         .arg(Arg::new("debug")
             .long("debug")
@@ -249,15 +317,13 @@ fn parse_args() -> Result<Config> {
             .long("fail-if")
             .help("Exit with code 3 if condition is met (policy gates)")
             .value_name("EXPR")
-            .value_parser(value_parser!(String)));
+            .value_parser(value_parser!(String)))
+}
 
-    let matches = match app.try_get_matches() {
-        Ok(matches) => matches,
-        Err(e) => e.exit(), // Exits with 0 for --help/--version, non-zero for errors
-    };
-
+fn config_from_matches(matches: &ArgMatches) -> Result<Config> {
     let config = Config {
         init: matches.get_flag("init"),
+        force: matches.get_flag("force"),
         scan: matches.get_flag("scan"),
         all: matches.get_flag("all"),
         doctor: matches.get_flag("doctor"),
@@ -274,7 +340,31 @@ fn parse_args() -> Result<Config> {
         sha: matches.get_one::<String>("sha").cloned(),
     };
 
+    if let Some(min_confidence) = config.min_confidence {
+        if !(0.0..=1.0).contains(&min_confidence) {
+            bail!("--min-confidence must be between 0.0 and 1.0");
+        }
+    }
+
     Ok(config)
+}
+
+/// Parse command line arguments into Config
+fn parse_args() -> Result<Config> {
+    let app = build_cli();
+
+    let matches = match app.try_get_matches() {
+        Ok(matches) => matches,
+        Err(e) => e.exit(), // Exits with 0 for --help/--version, non-zero for errors
+    };
+    config_from_matches(&matches)
+}
+
+#[cfg(test)]
+fn parse_args_from(args: &[&str]) -> Result<Config> {
+    let app = build_cli();
+    let matches = app.try_get_matches_from(args)?;
+    config_from_matches(&matches)
 }
 
 /// Implement --doctor command: read-only cache diagnostics
@@ -444,7 +534,7 @@ fn print_diagnostic_results(results: &store::DiagnosticResults, config: &Config)
 }
 
 /// Implement --init command: create templates and snippets
-fn run_init_command() -> Result<()> {
+fn run_init_command(force: bool) -> Result<()> {
     use std::fs;
     use std::path::Path;
 
@@ -462,7 +552,49 @@ fn run_init_command() -> Result<()> {
     fs::create_dir_all(&ci_dir)?;
     fs::create_dir_all(&hooks_dir)?;
 
+    #[derive(Clone, Copy)]
+    enum WriteOutcome {
+        Created,
+        Skipped,
+        Overwritten,
+    }
+
+    fn write_file(path: &Path, content: &str, force: bool) -> Result<WriteOutcome> {
+        if path.exists() {
+            let metadata = fs::metadata(path)?;
+            if !metadata.is_file() {
+                bail!("error: expected file at {}, found non-file", path.display());
+            }
+            if force {
+                fs::write(path, content)?;
+                return Ok(WriteOutcome::Overwritten);
+            }
+            return Ok(WriteOutcome::Skipped);
+        }
+
+        fs::write(path, content)?;
+        Ok(WriteOutcome::Created)
+    }
+
+    let rel_path = |path: &Path| {
+        path.strip_prefix(regret_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string()
+    };
+
     let mut created_files = Vec::new();
+    let mut skipped_files = Vec::new();
+    let mut overwritten_files = Vec::new();
+
+    let mut record = |outcome: WriteOutcome, path: &Path| {
+        let rel = rel_path(path);
+        match outcome {
+            WriteOutcome::Created => created_files.push(rel),
+            WriteOutcome::Skipped => skipped_files.push(rel),
+            WriteOutcome::Overwritten => overwritten_files.push(rel),
+        }
+    };
 
     // 1. commit-template.txt
     let commit_template_content = r#"# regret commit template
@@ -480,8 +612,10 @@ fn run_init_command() -> Result<()> {
 "#;
 
     let commit_template_path = regret_dir.join("commit-template.txt");
-    fs::write(&commit_template_path, commit_template_content)?;
-    created_files.push("commit-template.txt");
+    record(
+        write_file(&commit_template_path, commit_template_content, force)?,
+        &commit_template_path,
+    );
 
     // 2. ADOPTION.md
     let adoption_content = r#"# regret adoption
@@ -500,8 +634,10 @@ Check current setting:
 "#;
 
     let adoption_path = regret_dir.join("ADOPTION.md");
-    fs::write(&adoption_path, adoption_content)?;
-    created_files.push("ADOPTION.md");
+    record(
+        write_file(&adoption_path, adoption_content, force)?,
+        &adoption_path,
+    );
 
     // 3. agent-snippets/regret-linked-fix.md
     let linked_fix_content = r#"# regret: linked-fix trailers (agent rule)
@@ -514,8 +650,10 @@ When you make a follow-up fix for a previous commit, add a trailer referencing t
 "#;
 
     let linked_fix_path = agent_snippets_dir.join("regret-linked-fix.md");
-    fs::write(&linked_fix_path, linked_fix_content)?;
-    created_files.push("agent-snippets/regret-linked-fix.md");
+    record(
+        write_file(&linked_fix_path, linked_fix_content, force)?,
+        &linked_fix_path,
+    );
 
     // 4. agent-snippets/regret-session-context.md
     let session_context_content = r#"# regret: session context trailers (agent rule)
@@ -530,8 +668,10 @@ These trailers enable `cass` and other tools to join commit history back to the 
 "#;
 
     let session_context_path = agent_snippets_dir.join("regret-session-context.md");
-    fs::write(&session_context_path, session_context_content)?;
-    created_files.push("agent-snippets/regret-session-context.md");
+    record(
+        write_file(&session_context_path, session_context_content, force)?,
+        &session_context_path,
+    );
 
     // 5. ci/github-actions-regret.yml
     let github_actions_content = r#"# Add this job to your .github/workflows/ci.yml or create a separate workflow
@@ -555,8 +695,10 @@ regret-check:
 "#;
 
     let github_actions_path = ci_dir.join("github-actions-regret.yml");
-    fs::write(&github_actions_path, github_actions_content)?;
-    created_files.push("ci/github-actions-regret.yml");
+    record(
+        write_file(&github_actions_path, github_actions_content, force)?,
+        &github_actions_path,
+    );
 
     // 6. hooks/commit-msg (POSIX sh, advisory only)
     let commit_msg_hook_content = r#"#!/bin/sh
@@ -576,29 +718,52 @@ exit 0
 "#;
 
     let commit_msg_path = hooks_dir.join("commit-msg");
-    fs::write(&commit_msg_path, commit_msg_hook_content)?;
+    let hook_outcome = write_file(&commit_msg_path, commit_msg_hook_content, force)?;
+    record(hook_outcome, &commit_msg_path);
 
-    // Make the hook executable on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&commit_msg_path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&commit_msg_path, perms)?;
+    // Make the hook executable on Unix (only if written)
+    if matches!(
+        hook_outcome,
+        WriteOutcome::Created | WriteOutcome::Overwritten
+    ) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&commit_msg_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&commit_msg_path, perms)?;
+        }
     }
 
-    created_files.push("hooks/commit-msg");
+    if !created_files.is_empty() {
+        println!("Created:");
+        for file in &created_files {
+            println!("  {}", file);
+        }
+    }
 
-    // Print what was created
-    println!("Created:");
-    for file in &created_files {
-        println!("  {}", file);
+    if !overwritten_files.is_empty() {
+        println!("Overwritten (--force):");
+        for file in &overwritten_files {
+            println!("  {}", file);
+        }
+    }
+
+    if !skipped_files.is_empty() {
+        println!("Skipped (exists):");
+        for file in &skipped_files {
+            println!("  {}", file);
+        }
     }
 
     // Print next steps
     println!("\nNext steps:");
     println!("  git config commit.template .regret/commit-template.txt");
     println!("  git config --unset commit.template");
+    println!("\nHook (optional, local repo):");
+    println!("  cp .regret/hooks/commit-msg .git/hooks/commit-msg");
+    println!("  chmod +x .git/hooks/commit-msg");
+    println!("  (If you already have a commit-msg hook, merge manually)");
 
     Ok(())
 }
@@ -608,13 +773,13 @@ fn main() {
     let config = match parse_args() {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("{}", format_error_message(&e));
             process::exit(2);
         }
     };
 
     if let Err(e) = run(config) {
-        eprintln!("Error: {}", e);
+        eprintln!("{}", format_error_message(&e));
         process::exit(1);
     }
 }
@@ -630,7 +795,7 @@ fn run(config: Config) -> Result<()> {
 
     // Handle modes that don't need cache
     match &mode {
-        Mode::Init => return run_init_command(),
+        Mode::Init => return run_init_command(config.force),
         Mode::Doctor => return run_doctor_command(&config),
         _ => {}
     }
@@ -641,6 +806,38 @@ fn run(config: Config) -> Result<()> {
     let selected = selected_branch::ensure_selected_branch(&repo_root, &store)?;
     fast_path::ensure_meta_defaults(&store, &selected)?;
     let until_info = time_window::compute_until(&config.until, &repo_root, &selected)?;
+    let file_config = config_file::load_config(&repo_root)?;
+
+    let default_ranking_since = parse_duration_config(
+        file_config
+            .ranking
+            .default_since
+            .as_deref()
+            .unwrap_or("30d"),
+        "ranking.default_since",
+    )?;
+    let default_scan_since = parse_duration_config(
+        file_config.scan.bootstrap_since.as_deref().unwrap_or("45d"),
+        "scan.bootstrap_since",
+    )?;
+
+    let explicit_since_utc = config
+        .since
+        .as_ref()
+        .map(|duration| compute_since(until_info.until, duration));
+
+    let ranking_since_utc = if config.all {
+        None
+    } else if let Some(since) = explicit_since_utc {
+        Some(since)
+    } else {
+        Some(compute_since(until_info.until, &default_ranking_since))
+    };
+
+    let ranking_window = WindowInfo {
+        since: ranking_since_utc,
+        until: until_info.until,
+    };
 
     if config.debug {
         eprintln!("Debug: selected_branch = {}", selected);
@@ -654,32 +851,100 @@ fn run(config: Config) -> Result<()> {
     // Track scan results
     let mut new_commits = 0usize;
     let mut scan_status = output::ScanStatus::Skipped;
+    let mut did_scan = false;
+
+    let scan_since_default = compute_since(until_info.until, &default_scan_since);
 
     // Run scan if needed
     match &mode {
         Mode::Scan => {
-            let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
-            new_commits = summary.new_commits;
-            scan_status = output::ScanStatus::Ran;
-            if config.debug {
-                eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+            if config.all {
+                let summary = scan::full_scan(&repo_root, &mut store, &selected, config.deep)?;
+                new_commits += summary.new_commits;
+                did_scan = true;
+            } else {
+                let summary =
+                    scan::incremental_scan(&repo_root, &mut store, &selected, config.deep)?;
+                new_commits += summary.new_commits;
+                did_scan = true;
+                if config.debug {
+                    eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+                }
+
+                if !summary.rewrite_detected {
+                    let scan_since = explicit_since_utc.unwrap_or(scan_since_default);
+                    let coverage_since_utc = store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)?;
+                    let coverage_since = coverage_since_utc
+                        .as_deref()
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+
+                    if coverage_since.map(|c| c > scan_since).unwrap_or(true) {
+                        let summary = scan::backfill_scan(
+                            &repo_root,
+                            &mut store,
+                            &selected,
+                            scan_since,
+                            coverage_since,
+                            config.deep,
+                        )?;
+                        new_commits += summary.new_commits;
+                    }
+                }
             }
         }
         Mode::Default if !config.no_scan => {
-            let skip_scan = fast_path::should_skip_scan(&repo_root, &store, &selected)?;
-            if config.debug {
-                eprintln!("Debug: fast_path_skip_scan = {}", skip_scan);
-            }
-            if !skip_scan {
-                let summary = scan::incremental_scan(&repo_root, &mut store, &selected)?;
-                new_commits = summary.new_commits;
-                scan_status = output::ScanStatus::Ran;
+            if config.all {
+                let summary = scan::full_scan(&repo_root, &mut store, &selected, config.deep)?;
+                new_commits += summary.new_commits;
+                did_scan = true;
+            } else {
+                let skip_scan = fast_path::should_skip_scan(&repo_root, &store, &selected)?;
                 if config.debug {
-                    eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+                    eprintln!("Debug: fast_path_skip_scan = {}", skip_scan);
+                }
+                let mut rewrite_detected = false;
+                if !skip_scan {
+                    let summary =
+                        scan::incremental_scan(&repo_root, &mut store, &selected, config.deep)?;
+                    new_commits += summary.new_commits;
+                    rewrite_detected = summary.rewrite_detected;
+                    did_scan = true;
+                    if config.debug {
+                        eprintln!("Debug: scan_new_commits = {}", summary.new_commits);
+                    }
+                }
+
+                if !rewrite_detected {
+                    if let Some(explicit_since) = explicit_since_utc {
+                        let coverage_since_utc =
+                            store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)?;
+                        let coverage_since = coverage_since_utc
+                            .as_deref()
+                            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                            .map(|dt| dt.with_timezone(&Utc));
+
+                        if coverage_since.map(|c| c > explicit_since).unwrap_or(true) {
+                            let summary = scan::backfill_scan(
+                                &repo_root,
+                                &mut store,
+                                &selected,
+                                explicit_since,
+                                coverage_since,
+                                config.deep,
+                            )?;
+                            new_commits += summary.new_commits;
+                            did_scan = true;
+                        }
+                    }
                 }
             }
         }
         _ => {}
+    }
+
+    if did_scan {
+        scan_status = output::ScanStatus::Ran;
     }
 
     // Execute based on resolved mode
@@ -690,7 +955,14 @@ fn run(config: Config) -> Result<()> {
             println!("Scanned {} commits", new_commits);
         }
         Mode::Explain(sha) => {
-            run_explain_output(&config, &store, &selected, &sha, &until_info)?;
+            run_explain_output(
+                &config,
+                &store,
+                &selected,
+                &sha,
+                &ranking_window,
+                &until_info,
+            )?;
         }
         Mode::Default => {
             // Default ranking mode: print output (NDJSON or human-readable)
@@ -700,6 +972,7 @@ fn run(config: Config) -> Result<()> {
                 &selected,
                 new_commits,
                 scan_status,
+                &ranking_window,
                 &until_info,
             )?;
         }
@@ -715,6 +988,7 @@ fn run_ranking_output(
     selected: &str,
     new_commits: usize,
     scan_status: output::ScanStatus,
+    window: &WindowInfo,
     until_info: &time_window::UntilInfo,
 ) -> Result<()> {
     // Get repo info
@@ -729,35 +1003,44 @@ fn run_ranking_output(
     let coverage_valid = store.get_meta_bool("coverage_valid")?.unwrap_or(false);
     let cache_valid = store.get_meta_bool("cache_valid")?.unwrap_or(false);
 
-    // Compute coverage days
-    let coverage_days = match &coverage_since_utc {
-        Some(since_utc) => {
-            if let Ok(since) = DateTime::parse_from_rfc3339(since_utc) {
-                let now = Utc::now();
-                let duration = now.signed_duration_since(since);
-                Some(duration.num_days() as u64)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
+    let window_until_utc = window.until.to_rfc3339();
+    let window_since_utc = window.since.map(|since| since.to_rfc3339());
+    let window_days = compute_window_days(window.since, window.until);
+    let window_hint = compute_window_hint(window.since, window.until);
 
-    // Get total scanned commits
+    let coverage_since = coverage_since_utc
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|dt| dt.with_timezone(&Utc));
+
+    // Compute coverage days (relative to frozen window end)
+    let coverage_days = coverage_since.as_ref().map(|since| {
+        let duration = window.until.signed_duration_since(*since);
+        duration.num_days().max(0) as u64
+    });
+
+    // Get total scanned commits (all-time) and windowed commit count
     let scanned_commits = store.get_commit_count()?;
+    let commits_in_window =
+        store.get_commit_count_in_window(window_since_utc.as_deref(), &window_until_utc)?;
 
-    // Get signals and aggregate
-    let signals = store.get_signals_for_ranking(selected)?;
+    // Get signals for window and aggregate
+    let signals =
+        store.get_signals_for_ranking(selected, window_since_utc.as_deref(), &window_until_utc)?;
     let min_confidence = config.min_confidence.unwrap_or(0.0);
-    let ranked = output::aggregate_culprits(&signals, min_confidence);
+    let signals: Vec<_> = signals
+        .into_iter()
+        .filter(|signal| signal.confidence >= min_confidence)
+        .collect();
+    let ranked = output::aggregate_culprits(&signals, min_confidence, window.until);
 
-    // Count events and max score
+    // Count events and max score (after confidence/window filtering)
     let events: usize = ranked.iter().map(|c| c.events).sum();
     let max_score = ranked.first().map(|c| c.score).unwrap_or(0);
 
     // Compute events_per_100_commits for policy evaluation
-    let events_per_100_commits = if scanned_commits > 0 {
-        (events as f64 / scanned_commits as f64) * 100.0
+    let events_per_100_commits = if commits_in_window > 0 {
+        (events as f64 / commits_in_window as f64) * 100.0
     } else {
         0.0
     };
@@ -777,22 +1060,25 @@ fn run_ranking_output(
 
     // NDJSON output mode
     if config.ndjson {
-        let window_until_source = format!("{:?}", until_info.source);
+        let window_until_source = until_info.source.as_str().to_string();
 
         output::print_ndjson(&output::NdjsonInfo {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             repo_path: repo_root,
             repo_basename,
             selected_branch: selected.to_string(),
-            window_since_utc: None, // TODO: from config.since if set
-            window_until_utc: until_info.until.to_rfc3339(),
+            window_since_utc: window_since_utc.clone(),
+            window_until_utc: window_until_utc.clone(),
             window_until_source,
             coverage_since_utc: coverage_since_utc.clone(),
             coverage_valid,
             cache_valid,
+            scan_status,
+            new_commits,
+            debug: config.debug,
             events,
             max_score,
-            commits_in_window: scanned_commits,
+            commits_in_window,
             coverage_days,
             ranked_culprits: &ranked,
             signals: &signals,
@@ -828,20 +1114,37 @@ fn run_ranking_output(
     let limit = config.limit.unwrap_or(5) as usize;
     output::print_top_table(&ranked, limit);
 
+    if let Some(culprit) = ranked.first() {
+        let short_sha = if culprit.culprit_sha.len() >= 7 {
+            &culprit.culprit_sha[..7]
+        } else {
+            &culprit.culprit_sha
+        };
+        println!("Explain: regret sha:{}", short_sha);
+    }
+
     // Print RATE line (always)
     println!();
     output::print_rate(&output::RateInfo {
         events,
-        commits: scanned_commits,
+        commits: commits_in_window,
     });
 
     // Determine coverage status
+    let coverage_complete = if window.since.is_none() {
+        coverage_since.is_some()
+    } else {
+        match (coverage_since.as_ref(), window.since.as_ref()) {
+            (Some(since), Some(window_since)) => *since <= *window_since,
+            _ => false,
+        }
+    };
     let coverage_status = if !coverage_valid {
         output::CoverageStatus::Invalid
-    } else if coverage_since_utc.is_none() || coverage_days.is_none() {
-        output::CoverageStatus::Incomplete
-    } else {
+    } else if coverage_complete {
         output::CoverageStatus::Complete
+    } else {
+        output::CoverageStatus::Incomplete
     };
 
     // Print COVERAGE line (only when incomplete or invalid)
@@ -852,7 +1155,7 @@ fn run_ranking_output(
                 coverage_since_utc: coverage_since_utc.clone().unwrap_or_default(),
                 coverage_valid,
             },
-            coverage_days,
+            window_hint.as_deref(),
         );
     }
 
@@ -869,7 +1172,7 @@ fn run_ranking_output(
             output::NoEventsReason::NoSignalsDetected
         } else {
             // Signals exist but outside window or filtered by confidence
-            output::NoEventsReason::SignalsOutsideWindow
+            output::NoEventsReason::SignalsOutsideWindowOrThreshold
         };
 
         println!();
@@ -877,6 +1180,9 @@ fn run_ranking_output(
             reverts_detected,
             linked_fix_trailers: linked_fix_detected,
             coverage_days,
+            window_days,
+            window_hint: window_hint.clone(),
+            min_confidence,
             reason,
         });
     }
@@ -902,6 +1208,7 @@ fn run_explain_output(
     store: &store::Store,
     selected: &str,
     sha_prefix: &str,
+    window: &WindowInfo,
     until_info: &time_window::UntilInfo,
 ) -> Result<()> {
     // Resolve SHA prefix to full SHA
@@ -930,8 +1237,21 @@ fn run_explain_output(
     let coverage_valid = store.get_meta_bool("coverage_valid")?.unwrap_or(false);
     let cache_valid = store.get_meta_bool("cache_valid")?.unwrap_or(false);
 
-    // Get signals for this culprit
-    let signals = store.get_signals_for_culprit(selected, &full_sha)?;
+    let window_until_utc = window.until.to_rfc3339();
+    let window_since_utc = window.since.map(|since| since.to_rfc3339());
+
+    // Get signals for this culprit within the window
+    let signals = store.get_signals_for_culprit(
+        selected,
+        &full_sha,
+        window_since_utc.as_deref(),
+        &window_until_utc,
+    )?;
+    let min_confidence = config.min_confidence.unwrap_or(0.0);
+    let signals: Vec<_> = signals
+        .into_iter()
+        .filter(|signal| signal.confidence >= min_confidence)
+        .collect();
 
     // Build explain info
     let explain_info = output::ExplainInfo {
@@ -941,11 +1261,13 @@ fn run_explain_output(
         repo_path: repo_root,
         repo_basename,
         selected_branch: selected.to_string(),
-        window_until_utc: until_info.until.to_rfc3339(),
-        window_until_source: format!("{:?}", until_info.source),
+        window_since_utc: window_since_utc.clone(),
+        window_until_utc: window_until_utc.clone(),
+        window_until_source: until_info.source.as_str().to_string(),
         coverage_since_utc,
         coverage_valid,
         cache_valid,
+        debug: config.debug,
     };
 
     if config.ndjson {
@@ -1003,6 +1325,78 @@ mod tests {
         assert!(parse_sha_arg("sha:").is_err()); // Empty SHA
         assert!(parse_sha_arg("sha:xyz").is_err()); // Non-hex characters
         assert!(parse_sha_arg("sha:123").is_err()); // Too short (less than 4)
+    }
+
+    #[test]
+    fn test_compute_window_days() {
+        let until = DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let since = DateTime::parse_from_rfc3339("2026-01-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(compute_window_days(Some(since), until), Some(5));
+        assert_eq!(compute_window_days(None, until), None);
+    }
+
+    #[test]
+    fn test_compute_window_hint() {
+        let until = DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let since = compute_since(until, &Duration::Hours(12));
+        assert_eq!(
+            compute_window_hint(Some(since), until),
+            Some("12h".to_string())
+        );
+
+        let since = compute_since(until, &Duration::Hours(36));
+        assert_eq!(
+            compute_window_hint(Some(since), until),
+            Some("36h".to_string())
+        );
+
+        let since = compute_since(until, &Duration::Days(30));
+        assert_eq!(
+            compute_window_hint(Some(since), until),
+            Some("30d".to_string())
+        );
+
+        let since = compute_since(until, &Duration::Weeks(2));
+        assert_eq!(
+            compute_window_hint(Some(since), until),
+            Some("2w".to_string())
+        );
+
+        assert_eq!(compute_window_hint(None, until), None);
+    }
+
+    #[test]
+    fn test_compute_since_from_duration() {
+        let until = DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let since = compute_since(until, &Duration::Days(5));
+        assert_eq!(since.to_rfc3339(), "2026-01-05T00:00:00+00:00");
+    }
+
+    #[test]
+    fn test_conflicting_flags_fail() {
+        assert!(parse_args_from(&["regret", "--ndjson", "--table"]).is_err());
+        assert!(parse_args_from(&["regret", "--scan", "--ndjson"]).is_err());
+        assert!(parse_args_from(&["regret", "--all", "--no-scan"]).is_err());
+    }
+
+    #[test]
+    fn test_min_confidence_validation() {
+        assert!(parse_args_from(&["regret", "--min-confidence", "1.5"]).is_err());
+        assert!(parse_args_from(&["regret", "--min-confidence", "0.5"]).is_ok());
+    }
+
+    #[test]
+    fn test_force_requires_init() {
+        assert!(parse_args_from(&["regret", "--force"]).is_err());
     }
 
     #[test]

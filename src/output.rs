@@ -5,9 +5,10 @@
 //! - TOP culprits table (§10.1.2)
 //! - NDJSON meta and stat records (§10.2)
 
+use blake3::Hasher;
 use chrono::{DateTime, Utc};
+use git2::Repository;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 /// Summary information for the header line.
 pub struct HeaderInfo {
@@ -67,12 +68,13 @@ pub fn print_header(info: &HeaderInfo) {
         Some(days) => days.to_string(),
         None => "?".to_string(),
     };
+    let branch_display = format_branch_display(&info.selected_branch);
 
     println!(
         "regret {} repo={} branch={} scan={} new_commits={} scanned_commits={} coverage_days={}",
         info.tool_version,
         info.repo_basename,
-        info.selected_branch,
+        branch_display,
         info.scan_status.as_str(),
         info.new_commits,
         info.scanned_commits,
@@ -82,7 +84,7 @@ pub fn print_header(info: &HeaderInfo) {
 
 /// Print the TOP culprits table per §10.1.2.
 ///
-/// Columns: id, score, events, ttr_p50_h, culprit_date_utc, culprit_age, subject_trunc, conf
+/// Columns: id, score, events, ttr_p50_h, sha, date_utc, culprit_age, subject_trunc, conf
 pub fn print_top_table(culprits: &[RankedCulprit], limit: usize) {
     if culprits.is_empty() {
         return;
@@ -91,10 +93,10 @@ pub fn print_top_table(culprits: &[RankedCulprit], limit: usize) {
     // Print header
     println!();
     println!(
-        "{:>3} {:>6} {:>6} {:>10} {:>20} {:>8} {:<80} {:>5}",
-        "id", "score", "events", "ttr_p50_h", "culprit_date_utc", "age", "subject", "conf"
+        "{:>3} {:>6} {:>6} {:>10} {:<8} {:>10} {:>8} {:<80} {:>5}",
+        "id", "score", "events", "ttr_p50_h", "sha", "date_utc", "age", "subject", "conf"
     );
-    println!("{}", "-".repeat(145));
+    println!("{}", "-".repeat(144));
 
     // Print rows (up to limit)
     for culprit in culprits.iter().take(limit) {
@@ -108,19 +110,16 @@ pub fn print_top_table(culprits: &[RankedCulprit], limit: usize) {
         let subject = truncate_subject(&culprit.subject_trunc, 80);
 
         println!(
-            "{:>3} {:>6} {:>6} {:>10.1} {:>20} {:>8} {:<80} {:>5.2}",
+            "{:>3} {:>6} {:>6} {:>10.1} {:<8} {:>10} {:>8} {:<80} {:>5.2}",
             culprit.id,
             culprit.score,
             culprit.events,
             culprit.ttr_p50_hours,
-            format!(
-                "{} {}",
-                culprit
-                    .culprit_date_utc
-                    .get(..10)
-                    .unwrap_or(&culprit.culprit_date_utc),
-                short_sha
-            ),
+            short_sha,
+            culprit
+                .culprit_date_utc
+                .get(..10)
+                .unwrap_or(&culprit.culprit_date_utc),
             culprit.culprit_age,
             subject,
             culprit.min_confidence,
@@ -139,14 +138,26 @@ fn truncate_subject(subject: &str, max_len: usize) -> String {
     }
 }
 
+fn format_branch_display(branch: &str) -> String {
+    if let Some(stripped) = branch.strip_prefix("refs/heads/") {
+        return stripped.to_string();
+    }
+    if let Some(stripped) = branch.strip_prefix("refs/remotes/") {
+        return stripped.to_string();
+    }
+    if let Some(stripped) = branch.strip_prefix("refs/") {
+        return stripped.to_string();
+    }
+    branch.to_string()
+}
+
 /// Compute human-readable age from a UTC timestamp.
-pub fn compute_age(commit_time_utc: &str) -> String {
+pub fn compute_age_at(commit_time_utc: &str, now: DateTime<Utc>) -> String {
     let commit_time = match DateTime::parse_from_rfc3339(commit_time_utc) {
         Ok(dt) => dt.with_timezone(&Utc),
         Err(_) => return "?".to_string(),
     };
 
-    let now = Utc::now();
     let duration = now.signed_duration_since(commit_time);
 
     let hours = duration.num_hours();
@@ -231,7 +242,7 @@ pub struct CoverageInfo {
 ///
 /// Format: COVERAGE status=<status> coverage_since_utc=<ts> coverage_valid=<0|1>
 /// NEXT: regret --scan --since <window> (or --all for invalid)
-pub fn print_coverage(info: &CoverageInfo, window_days: Option<u64>) {
+pub fn print_coverage(info: &CoverageInfo, window_hint: Option<&str>) {
     if info.status == CoverageStatus::Complete {
         return;
     }
@@ -245,8 +256,11 @@ pub fn print_coverage(info: &CoverageInfo, window_days: Option<u64>) {
 
     match info.status {
         CoverageStatus::Incomplete => {
-            let window = window_days.unwrap_or(30);
-            println!("NEXT: regret --scan --since {}d", window);
+            if let Some(window) = window_hint {
+                println!("NEXT: regret --scan --since {}", window);
+            } else {
+                println!("NEXT: regret --scan --all");
+            }
         }
         CoverageStatus::Invalid => {
             println!("NEXT: regret --scan --all");
@@ -260,7 +274,7 @@ pub fn print_coverage(info: &CoverageInfo, window_days: Option<u64>) {
 pub enum NoEventsReason {
     CoverageIncomplete,
     NoSignalsDetected,
-    SignalsOutsideWindow,
+    SignalsOutsideWindowOrThreshold,
 }
 
 impl NoEventsReason {
@@ -268,7 +282,9 @@ impl NoEventsReason {
         match self {
             NoEventsReason::CoverageIncomplete => "coverage_incomplete",
             NoEventsReason::NoSignalsDetected => "no_signals_detected",
-            NoEventsReason::SignalsOutsideWindow => "signals_outside_window",
+            NoEventsReason::SignalsOutsideWindowOrThreshold => {
+                "signals_outside_window_or_threshold"
+            }
         }
     }
 }
@@ -278,6 +294,9 @@ pub struct NoEventsInfo {
     pub reverts_detected: usize,
     pub linked_fix_trailers: usize,
     pub coverage_days: Option<u64>,
+    pub window_days: Option<u64>,
+    pub window_hint: Option<String>,
+    pub min_confidence: f64,
     pub reason: NoEventsReason,
 }
 
@@ -294,20 +313,39 @@ pub fn print_no_events(info: &NoEventsInfo) {
     };
 
     println!(
-        "NO_EVENTS reverts_detected={} linked_fix_trailers={} coverage_days={}",
+        "NO_EVENTS reverts_detected_in_coverage_horizon={} linked_fix_trailers_detected_in_coverage_horizon={} coverage_days={}",
         info.reverts_detected, info.linked_fix_trailers, coverage_str
     );
     println!("REASON: {}", info.reason.as_str());
 
     match info.reason {
         NoEventsReason::CoverageIncomplete => {
-            println!("NEXT: regret --scan --all");
+            if let Some(window) = info.window_hint.as_deref() {
+                println!("NEXT: regret --scan --since {}", window);
+            } else {
+                println!("NEXT: regret --scan --all");
+            }
         }
         NoEventsReason::NoSignalsDetected => {
-            println!("NEXT: git log --oneline | head -20 # verify recent commit activity");
+            println!("NEXT: regret --init");
+            println!("NEXT: git config commit.template .regret/commit-template.txt");
         }
-        NoEventsReason::SignalsOutsideWindow => {
-            println!("NEXT: regret --since 90d # widen ranking window");
+        NoEventsReason::SignalsOutsideWindowOrThreshold => {
+            let longer_window = info.window_days.map_or(90, |window| {
+                if window < 90 {
+                    90
+                } else {
+                    window.saturating_mul(2)
+                }
+            });
+            if info.min_confidence > 0.0 {
+                println!(
+                    "NEXT: regret --since {}d --min-confidence 0.0",
+                    longer_window
+                );
+            } else {
+                println!("NEXT: regret --since {}d", longer_window);
+            }
         }
     }
 }
@@ -347,6 +385,25 @@ impl NdjsonStat {
     pub fn new<V: Into<serde_json::Value>>(name: &str, value: V) -> Self {
         Self {
             record_type: "stat",
+            name: name.to_string(),
+            value: value.into(),
+        }
+    }
+}
+
+/// NDJSON diagnostic record (only emitted with --debug).
+#[derive(Debug, Clone, Serialize)]
+pub struct NdjsonDiag {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub name: String,
+    pub value: serde_json::Value,
+}
+
+impl NdjsonDiag {
+    pub fn new<V: Into<serde_json::Value>>(name: &str, value: V) -> Self {
+        Self {
+            record_type: "diag",
             name: name.to_string(),
             value: value.into(),
         }
@@ -398,6 +455,9 @@ pub struct NdjsonInfo<'a> {
     pub coverage_since_utc: Option<String>,
     pub coverage_valid: bool,
     pub cache_valid: bool,
+    pub scan_status: ScanStatus,
+    pub new_commits: usize,
+    pub debug: bool,
     pub events: usize,
     pub max_score: i64,
     pub commits_in_window: usize,
@@ -406,13 +466,41 @@ pub struct NdjsonInfo<'a> {
     pub signals: &'a [SignalRow],
 }
 
-/// Compute a stable repo_id from the repo path (SHA256 hash, first 16 hex chars).
+/// Compute a stable repo_id from the git common dir (blake3 hex).
 pub fn compute_repo_id(repo_path: &std::path::Path) -> String {
-    let path_str = repo_path.to_string_lossy();
-    let mut hasher = Sha256::new();
-    hasher.update(path_str.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // 16 hex chars
+    let git_dir = Repository::discover(repo_path)
+        .ok()
+        .map(|repo| repo.path().to_path_buf())
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let common_dir = resolve_common_dir(&git_dir);
+    let canonical = std::fs::canonicalize(&common_dir).unwrap_or(common_dir);
+
+    let mut hasher = Hasher::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(digest.as_bytes())
+}
+
+fn resolve_common_dir(git_dir: &std::path::Path) -> std::path::PathBuf {
+    let commondir_path = git_dir.join("commondir");
+    let commondir = match std::fs::read_to_string(&commondir_path) {
+        Ok(contents) => {
+            let trimmed = contents.trim();
+            if trimmed.is_empty() {
+                git_dir.to_path_buf()
+            } else {
+                let candidate = std::path::Path::new(trimmed);
+                if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    git_dir.join(candidate)
+                }
+            }
+        }
+        Err(_) => git_dir.to_path_buf(),
+    };
+
+    commondir
 }
 
 /// Print NDJSON output (meta + stat + rank + evidence records).
@@ -439,7 +527,18 @@ pub fn print_ndjson(info: &NdjsonInfo) {
     };
     println!("{}", serde_json::to_string(&meta).expect("serialize meta"));
 
-    // 2. Stat records (fixed order by name)
+    // 2. Diag records (only with --debug; fixed order by name)
+    if info.debug {
+        let diags = [
+            NdjsonDiag::new("scan_status", info.scan_status.as_str()),
+            NdjsonDiag::new("new_commits", info.new_commits as i64),
+        ];
+        for diag in diags {
+            println!("{}", serde_json::to_string(&diag).expect("serialize diag"));
+        }
+    }
+
+    // 3. Stat records (fixed order by name)
     let rate = if info.commits_in_window > 0 {
         (info.events as f64 / info.commits_in_window as f64) * 100.0
     } else {
@@ -461,7 +560,7 @@ pub fn print_ndjson(info: &NdjsonInfo) {
         println!("{}", serde_json::to_string(&stat).expect("serialize stat"));
     }
 
-    // 3. Rank records (sorted by score desc, then SHA)
+    // 4. Rank records (sorted by score desc, then SHA)
     for culprit in info.ranked_culprits {
         let rank = NdjsonRank {
             record_type: "rank",
@@ -475,7 +574,7 @@ pub fn print_ndjson(info: &NdjsonInfo) {
         println!("{}", serde_json::to_string(&rank).expect("serialize rank"));
     }
 
-    // 4. Evidence records (grouped by culprit, then evidence_time, then SHA)
+    // 5. Evidence records (grouped by culprit, then evidence_time, then SHA)
     // Build a map of signals grouped by culprit
     let mut by_culprit: std::collections::HashMap<&str, Vec<&SignalRow>> =
         std::collections::HashMap::new();
@@ -489,11 +588,11 @@ pub fn print_ndjson(info: &NdjsonInfo) {
     // Output evidence in culprit order (matching rank order)
     for culprit in info.ranked_culprits {
         if let Some(signals) = by_culprit.get(culprit.culprit_sha.as_str()) {
-            // Sort by evidence time, then SHA
+            // Sort by evidence time desc, then SHA asc
             let mut sorted_signals: Vec<_> = signals.iter().collect();
             sorted_signals.sort_by(|a, b| {
-                a.culprit_time_utc
-                    .cmp(&b.culprit_time_utc)
+                b.evidence_time_utc
+                    .cmp(&a.evidence_time_utc)
                     .then_with(|| a.evidence_sha.cmp(&b.evidence_sha))
             });
 
@@ -546,6 +645,7 @@ fn confidence_reason_from_weight_and_confidence(weight: i64, confidence: f64) ->
 pub struct SignalRow {
     pub culprit_sha: String,
     pub evidence_sha: String,
+    pub evidence_time_utc: String,
     pub weight: i64,
     pub confidence: f64,
     pub time_to_regret_hours: f64,
@@ -557,7 +657,11 @@ pub struct SignalRow {
 ///
 /// Scoring per §9.1: score = Σ(weight) for signals in window with confidence >= min_confidence
 /// Sorting: score desc, then culprit SHA (lexical)
-pub fn aggregate_culprits(signals: &[SignalRow], min_confidence: f64) -> Vec<RankedCulprit> {
+pub fn aggregate_culprits(
+    signals: &[SignalRow],
+    min_confidence: f64,
+    now: DateTime<Utc>,
+) -> Vec<RankedCulprit> {
     use std::collections::HashMap;
 
     // Group signals by culprit_sha
@@ -588,7 +692,7 @@ pub fn aggregate_culprits(signals: &[SignalRow], min_confidence: f64) -> Vec<Ran
 
             // Take info from first signal
             let first = signals[0];
-            let age = compute_age(&first.culprit_time_utc);
+            let age = compute_age_at(&first.culprit_time_utc, now);
             let subject = first
                 .culprit_subject
                 .clone()
@@ -636,11 +740,13 @@ pub struct ExplainInfo<'a> {
     pub repo_path: std::path::PathBuf,
     pub repo_basename: String,
     pub selected_branch: String,
+    pub window_since_utc: Option<String>,
     pub window_until_utc: String,
     pub window_until_source: String,
     pub coverage_since_utc: Option<String>,
     pub coverage_valid: bool,
     pub cache_valid: bool,
+    pub debug: bool,
 }
 
 /// Print NO_SIGNALS message for non-culprit SHA.
@@ -660,7 +766,7 @@ pub fn print_no_signals_ndjson(info: &ExplainInfo) {
         repo_id,
         repo_basename: info.repo_basename.clone(),
         selected_branch: info.selected_branch.clone(),
-        window_since_utc: None,
+        window_since_utc: info.window_since_utc.clone(),
         window_until_utc: info.window_until_utc.clone(),
         window_until_source: info.window_until_source.clone(),
         coverage_since_utc: info.coverage_since_utc.clone(),
@@ -668,6 +774,11 @@ pub fn print_no_signals_ndjson(info: &ExplainInfo) {
         cache_valid: info.cache_valid,
     };
     println!("{}", serde_json::to_string(&meta).expect("serialize meta"));
+
+    if info.debug {
+        let diag = NdjsonDiag::new("mode", "explain");
+        println!("{}", serde_json::to_string(&diag).expect("serialize diag"));
+    }
 }
 
 /// Print human-readable explain output for a culprit.
@@ -678,7 +789,10 @@ pub fn print_explain_human(info: &ExplainInfo) {
     }
 
     // Aggregate for the culprit
-    let ranked = aggregate_culprits(info.signals, 0.0);
+    let now = DateTime::parse_from_rfc3339(&info.window_until_utc)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let ranked = aggregate_culprits(info.signals, 0.0, now);
     let culprit = &ranked[0];
 
     // Short SHA (7 chars)
@@ -710,9 +824,14 @@ pub fn print_explain_human(info: &ExplainInfo) {
         "type", "evidence_sha", "evidence_date_utc", "ttr_h", "conf"
     );
 
-    // Sort signals by evidence time desc (we need to get evidence time from store)
-    // For now, just print in the order we have (which is by evidence_time from the query)
-    for signal in info.signals {
+    let mut sorted_signals: Vec<_> = info.signals.iter().collect();
+    sorted_signals.sort_by(|a, b| {
+        b.evidence_time_utc
+            .cmp(&a.evidence_time_utc)
+            .then_with(|| a.evidence_sha.cmp(&b.evidence_sha))
+    });
+
+    for signal in sorted_signals {
         let signal_type = signal_type_from_weight(signal.weight);
         let short_evidence = if signal.evidence_sha.len() >= 7 {
             &signal.evidence_sha[..7]
@@ -721,13 +840,14 @@ pub fn print_explain_human(info: &ExplainInfo) {
         };
         let reason = confidence_reason_from_weight_and_confidence(signal.weight, signal.confidence);
 
-        // We don't have evidence_date_utc in SignalRow, use culprit_time + ttr for now
-        // TODO: Add evidence_time_utc to SignalRow
         println!(
             "  {:<12} {:<12} {:>20} {:>8.1} {:>6.2} {}",
             signal_type,
             short_evidence,
-            "-",
+            signal
+                .evidence_time_utc
+                .get(..10)
+                .unwrap_or(&signal.evidence_time_utc),
             signal.time_to_regret_hours,
             signal.confidence,
             reason
@@ -757,7 +877,7 @@ pub fn print_explain_ndjson(info: &ExplainInfo) {
         repo_id,
         repo_basename: info.repo_basename.clone(),
         selected_branch: info.selected_branch.clone(),
-        window_since_utc: None,
+        window_since_utc: info.window_since_utc.clone(),
         window_until_utc: info.window_until_utc.clone(),
         window_until_source: info.window_until_source.clone(),
         coverage_since_utc: info.coverage_since_utc.clone(),
@@ -766,8 +886,16 @@ pub fn print_explain_ndjson(info: &ExplainInfo) {
     };
     println!("{}", serde_json::to_string(&meta).expect("serialize meta"));
 
+    if info.debug {
+        let diag = NdjsonDiag::new("mode", "explain");
+        println!("{}", serde_json::to_string(&diag).expect("serialize diag"));
+    }
+
     // 2. One rank record (NO stat records per spec)
-    let ranked = aggregate_culprits(info.signals, 0.0);
+    let now = DateTime::parse_from_rfc3339(&info.window_until_utc)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let ranked = aggregate_culprits(info.signals, 0.0, now);
     if let Some(culprit) = ranked.first() {
         let rank = NdjsonRank {
             record_type: "rank",
@@ -781,8 +909,15 @@ pub fn print_explain_ndjson(info: &ExplainInfo) {
         println!("{}", serde_json::to_string(&rank).expect("serialize rank"));
     }
 
-    // 3. All evidence records for this culprit
-    for signal in info.signals {
+    // 3. All evidence records for this culprit (evidence_time desc, then sha)
+    let mut sorted_signals: Vec<_> = info.signals.iter().collect();
+    sorted_signals.sort_by(|a, b| {
+        b.evidence_time_utc
+            .cmp(&a.evidence_time_utc)
+            .then_with(|| a.evidence_sha.cmp(&b.evidence_sha))
+    });
+
+    for signal in sorted_signals {
         let evidence = NdjsonEvidence {
             record_type: "evidence",
             culprit_sha: signal.culprit_sha.clone(),
@@ -898,6 +1033,15 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_age_at_fixed_now() {
+        let now = DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let age = compute_age_at("2026-01-09T00:00:00Z", now);
+        assert_eq!(age, "1d");
+    }
+
+    #[test]
     fn test_median_odd() {
         let mut values = vec![1.0, 3.0, 2.0];
         assert_eq!(median(&mut values), 2.0);
@@ -921,6 +1065,7 @@ mod tests {
             SignalRow {
                 culprit_sha: "aaaa".to_string(),
                 evidence_sha: "bbbb".to_string(),
+                evidence_time_utc: "2026-01-28T10:00:00Z".to_string(),
                 weight: 10,
                 confidence: 0.95,
                 time_to_regret_hours: 24.0,
@@ -930,6 +1075,7 @@ mod tests {
             SignalRow {
                 culprit_sha: "cccc".to_string(),
                 evidence_sha: "dddd".to_string(),
+                evidence_time_utc: "2026-01-27T10:00:00Z".to_string(),
                 weight: 20,
                 confidence: 0.90,
                 time_to_regret_hours: 48.0,
@@ -938,7 +1084,8 @@ mod tests {
             },
         ];
 
-        let ranked = aggregate_culprits(&signals, 0.0);
+        let now = DateTime::<Utc>::from_timestamp(1_790_000_000, 0).unwrap();
+        let ranked = aggregate_culprits(&signals, 0.0, now);
 
         // cccc should be first (higher score)
         assert_eq!(ranked[0].culprit_sha, "cccc");
@@ -955,6 +1102,7 @@ mod tests {
         let signals = vec![SignalRow {
             culprit_sha: "aaaa".to_string(),
             evidence_sha: "bbbb".to_string(),
+            evidence_time_utc: "2026-01-28T10:00:00Z".to_string(),
             weight: 10,
             confidence: 0.85,
             time_to_regret_hours: 24.0,
@@ -963,11 +1111,12 @@ mod tests {
         }];
 
         // With min_confidence=0.90, this signal should be filtered out
-        let ranked = aggregate_culprits(&signals, 0.90);
+        let now = DateTime::<Utc>::from_timestamp(1_790_000_000, 0).unwrap();
+        let ranked = aggregate_culprits(&signals, 0.90, now);
         assert!(ranked.is_empty());
 
         // With min_confidence=0.80, it should be included
-        let ranked = aggregate_culprits(&signals, 0.80);
+        let ranked = aggregate_culprits(&signals, 0.80, now);
         assert_eq!(ranked.len(), 1);
     }
 }

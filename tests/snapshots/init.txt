@@ -9,3 +9,8 @@ Created:
 Next steps:
   git config commit.template .regret/commit-template.txt
   git config --unset commit.template
+
+Hook (optional, local repo):
+  cp .regret/hooks/commit-msg .git/hooks/commit-msg
+  chmod +x .git/hooks/commit-msg
+  (If you already have a commit-msg hook, merge manually)

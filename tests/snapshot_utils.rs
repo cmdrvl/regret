@@ -101,7 +101,7 @@ pub fn normalize_output(raw: &str, repo_path: &Path) -> String {
 
     // Normalize age column (changes over time): values like "108w", "30d", "5h", "<1h"
     // Match age values that appear in the table rows (after the 8-char culprit age column position)
-    let age_re = Regex::new(r"\s+(\d+[wdh]|<1h)\s+").expect("age regex");
+    let age_re = Regex::new(r"[ \t]+(\d+[wdh]|<1h)[ \t]+").expect("age regex");
     normalized = age_re.replace_all(&normalized, " <AGE> ").into_owned();
 
     normalized

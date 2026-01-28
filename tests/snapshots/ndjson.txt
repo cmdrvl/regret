@@ -1,9 +1,9 @@
-{"type":"meta","schema_version":1,"tool_version":"<VERSION>","repo_id":"<REPO_ID>","repo_basename":"repo","selected_branch":"refs/heads/main","window_since_utc":null,"window_until_utc":"2024-01-02T00:00:00+00:00","window_until_source":"Flag","coverage_since_utc":"2024-01-01T00:00:00+00:00","coverage_valid":true,"cache_valid":true}
+{"type":"meta","schema_version":1,"tool_version":"<VERSION>","repo_id":"<REPO_ID>","repo_basename":"repo","selected_branch":"refs/heads/main","window_since_utc":"2023-12-03T00:00:00+00:00","window_until_utc":"2024-01-02T00:00:00+00:00","window_until_source":"flag","coverage_since_utc":"2024-01-01T00:00:00+00:00","coverage_valid":true,"cache_valid":true}
 {"type":"stat","name":"regret_events","value":2}
 {"type":"stat","name":"max_score","value":10}
 {"type":"stat","name":"events_per_100_commits","value":5.263157894736842}
 {"type":"stat","name":"commits_in_window","value":38}
-{"type":"stat","name":"coverage_days","value":758}
+{"type":"stat","name":"coverage_days","value":1}
 {"type":"rank","culprit_sha":"1b39615556324b35361ced13b9dd5416c26e60ea","score":10,"events":1,"ttr_p50_h":0.08333333333333333,"culprit_time_utc":"2024-01-01T00:05:00+00:00"}
 {"type":"rank","culprit_sha":"1d1ceb196be0dfb92cd5c8396db3c40bdc954356","score":8,"events":1,"ttr_p50_h":0.08333333333333333,"culprit_time_utc":"2024-01-01T00:25:00+00:00"}
 {"type":"evidence","culprit_sha":"1b39615556324b35361ced13b9dd5416c26e60ea","evidence_sha":"442dee93ef990d06e987903c0704901109de711b","signal_type":"revert","confidence":0.95,"confidence_reason":"canonical_revert_line","time_to_regret_hours":0.08333333333333333}

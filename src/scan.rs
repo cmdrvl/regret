@@ -66,52 +66,53 @@ pub(crate) struct ScanSummary {
     pub(crate) rewrite_detected: bool,
 }
 
-pub(crate) fn incremental_scan(
-    repo_root: &Path,
-    store: &mut Store,
-    ref_name: &str,
-) -> Result<ScanSummary> {
-    let repo = Repository::discover(repo_root).with_context(|| {
-        format!(
-            "error: unable to open git repository {}",
-            repo_root.display()
-        )
-    })?;
-    let current_oid = fast_path::resolve_ref_oid(&repo, ref_name)?
-        .ok_or_else(|| anyhow!("error: unable to resolve ref {}", ref_name))?;
+#[derive(Debug, Clone, Copy)]
+struct TimeFilter {
+    since_secs: Option<i64>,
+    until_secs: Option<i64>,
+}
 
-    if detect_rewrite(&repo, store, current_oid)? {
-        store.set_meta_bool(META_COVERAGE_VALID, false)?;
-        store.set_meta_bool(META_CACHE_VALID, false)?;
-        store.set_meta_value(META_LAST_SCANNED_GRAPH_TIP, "")?;
-        store.set_meta_value(META_LAST_SCANNED_REF_OID, "")?;
-        return Ok(ScanSummary {
-            new_commits: 0,
-            ref_oid: current_oid.to_string(),
-            rewrite_detected: true,
-        });
+impl TimeFilter {
+    fn includes(&self, seconds: i64) -> bool {
+        if let Some(since) = self.since_secs {
+            if seconds < since {
+                return false;
+            }
+        }
+        if let Some(until) = self.until_secs {
+            if seconds >= until {
+                return false;
+            }
+        }
+        true
     }
+}
 
-    let mut revwalk = repo.revwalk()?;
-    revwalk.set_sorting(Sort::TOPOLOGICAL)?;
-    revwalk.push(current_oid)?;
+struct ScanWork {
+    rows: Vec<CommitRow>,
+    pending_revert_signals: Vec<(String, String, Vec<String>)>,
+    pending_linked_fix_signals: Vec<(String, String, Vec<String>)>,
+}
 
-    let last_tip = store.get_meta_value(META_LAST_SCANNED_GRAPH_TIP)?;
-    if let Some(last_tip) = last_tip.as_deref().filter(|value| !value.is_empty()) {
-        let last_oid = Oid::from_str(last_tip)
-            .map_err(|_| anyhow!("error: invalid last_scanned_graph_tip {}", last_tip))?;
-        revwalk.hide(last_oid).ok();
-    }
-
+fn scan_revwalk(
+    repo: &Repository,
+    revwalk: &mut git2::Revwalk,
+    filter: Option<TimeFilter>,
+) -> Result<ScanWork> {
     let mut rows: Vec<CommitRow> = Vec::new();
-    // Pending canonical revert signals: (evidence_sha, evidence_time, culprit_shas)
     let mut pending_revert_signals: Vec<(String, String, Vec<String>)> = Vec::new();
-    // Pending linked-fix signals: (evidence_sha, evidence_time, sha_prefixes)
     let mut pending_linked_fix_signals: Vec<(String, String, Vec<String>)> = Vec::new();
 
     for oid_result in revwalk {
         let oid = oid_result?;
         let commit = repo.find_commit(oid)?;
+
+        let seconds = commit.time().seconds();
+        if let Some(filter) = filter {
+            if !filter.includes(seconds) {
+                continue;
+            }
+        }
 
         let time_utc = commit_time_utc(&commit)?;
         let subject = commit.summary().map(truncate_subject);
@@ -144,13 +145,28 @@ pub(crate) fn incremental_scan(
         });
     }
 
-    store.upsert_commits(&rows)?;
+    Ok(ScanWork {
+        rows,
+        pending_revert_signals,
+        pending_linked_fix_signals,
+    })
+}
+
+fn apply_scan_work(
+    repo: &Repository,
+    store: &mut Store,
+    ref_name: &str,
+    work: ScanWork,
+    run_patch_id: bool,
+) -> Result<usize> {
+    let rows_len = work.rows.len();
+    store.upsert_commits(&work.rows)?;
 
     // Process pending signals now that commits are in the store
     let mut detected_signals: Vec<DetectedSignal> = Vec::new();
 
     // Process canonical revert signals (§8.1)
-    for (evidence_sha, evidence_time_utc, culprit_shas) in pending_revert_signals {
+    for (evidence_sha, evidence_time_utc, culprit_shas) in work.pending_revert_signals {
         for culprit_sha in culprit_shas {
             // Skip if signal already exists
             if store.signal_exists(&culprit_sha, &evidence_sha)? {
@@ -173,10 +189,10 @@ pub(crate) fn incremental_scan(
     }
 
     // Process linked-fix signals (§8.3)
-    for (evidence_sha, evidence_time_utc, sha_prefixes) in pending_linked_fix_signals {
+    for (evidence_sha, evidence_time_utc, sha_prefixes) in work.pending_linked_fix_signals {
         for sha_prefix in sha_prefixes {
             // Resolve SHA prefix against repository
-            let culprit_sha = match resolve_sha_prefix(&repo, &sha_prefix) {
+            let culprit_sha = match resolve_sha_prefix(repo, &sha_prefix) {
                 ShaResolution::Unique(sha) => sha,
                 ShaResolution::Ambiguous => {
                     // Per spec: ambiguous prefix = NO signal, debug diagnostic only
@@ -214,34 +230,152 @@ pub(crate) fn incremental_scan(
         store.insert_signals(ref_name, &detected_signals)?;
     }
 
-    // Run patch-ID matching for manual reverts (§8.2)
-    let patch_id_signals = run_patch_id_matching(&repo, store, ref_name)?;
-    if !patch_id_signals.is_empty() {
-        store.insert_signals(ref_name, &patch_id_signals)?;
+    if run_patch_id {
+        // Run patch-ID matching for manual reverts (§8.2)
+        let patch_id_signals = run_patch_id_matching(repo, store, ref_name)?;
+        if !patch_id_signals.is_empty() {
+            store.insert_signals(ref_name, &patch_id_signals)?;
+        }
     }
 
+    Ok(rows_len)
+}
+
+fn finalize_scan(store: &mut Store, repo: &Repository, current_oid: &Oid) -> Result<()> {
     fast_path::set_last_scanned_oids(store, &current_oid.to_string(), &current_oid.to_string())?;
     store.set_meta_bool(META_CACHE_VALID, true)?;
     store.set_meta_bool(META_COVERAGE_VALID, true)?;
 
-    let shallow_oids = shallow::shallow_boundary_oids_from_repo(&repo)?;
+    let shallow_oids = shallow::shallow_boundary_oids_from_repo(repo)?;
     let is_shallow = repo.is_shallow() || !shallow_oids.is_empty();
     store.set_meta_bool(META_IS_SHALLOW, is_shallow)?;
 
     if is_shallow {
-        if let Some((sha, time_utc)) = earliest_boundary(&repo, &shallow_oids)? {
+        if let Some((sha, time_utc)) = earliest_boundary(repo, &shallow_oids)? {
             store.set_meta_value(META_COVERAGE_SINCE_OID, &sha)?;
             store.set_meta_value(META_COVERAGE_SINCE_UTC, &time_utc)?;
         }
-    } else if store.get_meta_value(META_COVERAGE_SINCE_UTC)?.is_none() || last_tip.is_none() {
-        if let Some((sha, time_utc)) = store.get_oldest_commit()? {
-            store.set_meta_value(META_COVERAGE_SINCE_OID, &sha)?;
-            store.set_meta_value(META_COVERAGE_SINCE_UTC, &time_utc)?;
-        }
+    } else if let Some((sha, time_utc)) = store.get_oldest_commit()? {
+        store.set_meta_value(META_COVERAGE_SINCE_OID, &sha)?;
+        store.set_meta_value(META_COVERAGE_SINCE_UTC, &time_utc)?;
     }
 
+    Ok(())
+}
+
+pub(crate) fn incremental_scan(
+    repo_root: &Path,
+    store: &mut Store,
+    ref_name: &str,
+    run_patch_id: bool,
+) -> Result<ScanSummary> {
+    let repo = Repository::discover(repo_root).with_context(|| {
+        format!(
+            "error: unable to open git repository {}",
+            repo_root.display()
+        )
+    })?;
+    let current_oid = fast_path::resolve_ref_oid(&repo, ref_name)?
+        .ok_or_else(|| anyhow!("error: unable to resolve ref {}", ref_name))?;
+
+    if detect_rewrite(&repo, store, current_oid)? {
+        store.set_meta_bool(META_COVERAGE_VALID, false)?;
+        store.set_meta_bool(META_CACHE_VALID, false)?;
+        store.set_meta_value(META_LAST_SCANNED_GRAPH_TIP, "")?;
+        store.set_meta_value(META_LAST_SCANNED_REF_OID, "")?;
+        return Ok(ScanSummary {
+            new_commits: 0,
+            ref_oid: current_oid.to_string(),
+            rewrite_detected: true,
+        });
+    }
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(Sort::TOPOLOGICAL)?;
+    revwalk.push(current_oid)?;
+
+    let last_tip = store.get_meta_value(META_LAST_SCANNED_GRAPH_TIP)?;
+    if let Some(last_tip) = last_tip.as_deref().filter(|value| !value.is_empty()) {
+        let last_oid = Oid::from_str(last_tip)
+            .map_err(|_| anyhow!("error: invalid last_scanned_graph_tip {}", last_tip))?;
+        revwalk.hide(last_oid).ok();
+    }
+
+    let work = scan_revwalk(&repo, &mut revwalk, None)?;
+    let new_commits = apply_scan_work(&repo, store, ref_name, work, run_patch_id)?;
+    finalize_scan(store, &repo, &current_oid)?;
+
     Ok(ScanSummary {
-        new_commits: rows.len(),
+        new_commits,
+        ref_oid: current_oid.to_string(),
+        rewrite_detected: false,
+    })
+}
+
+pub(crate) fn backfill_scan(
+    repo_root: &Path,
+    store: &mut Store,
+    ref_name: &str,
+    since_utc: DateTime<Utc>,
+    until_utc: Option<DateTime<Utc>>,
+    run_patch_id: bool,
+) -> Result<ScanSummary> {
+    let repo = Repository::discover(repo_root).with_context(|| {
+        format!(
+            "error: unable to open git repository {}",
+            repo_root.display()
+        )
+    })?;
+    let current_oid = fast_path::resolve_ref_oid(&repo, ref_name)?
+        .ok_or_else(|| anyhow!("error: unable to resolve ref {}", ref_name))?;
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(Sort::TOPOLOGICAL)?;
+    revwalk.push(current_oid)?;
+
+    let filter = TimeFilter {
+        since_secs: Some(since_utc.timestamp()),
+        until_secs: until_utc.map(|t| t.timestamp()),
+    };
+
+    let work = scan_revwalk(&repo, &mut revwalk, Some(filter))?;
+    let new_commits = apply_scan_work(&repo, store, ref_name, work, run_patch_id)?;
+    finalize_scan(store, &repo, &current_oid)?;
+
+    Ok(ScanSummary {
+        new_commits,
+        ref_oid: current_oid.to_string(),
+        rewrite_detected: false,
+    })
+}
+
+pub(crate) fn full_scan(
+    repo_root: &Path,
+    store: &mut Store,
+    ref_name: &str,
+    run_patch_id: bool,
+) -> Result<ScanSummary> {
+    let repo = Repository::discover(repo_root).with_context(|| {
+        format!(
+            "error: unable to open git repository {}",
+            repo_root.display()
+        )
+    })?;
+    let current_oid = fast_path::resolve_ref_oid(&repo, ref_name)?
+        .ok_or_else(|| anyhow!("error: unable to resolve ref {}", ref_name))?;
+
+    store.reset_for_full_scan()?;
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(Sort::TOPOLOGICAL)?;
+    revwalk.push(current_oid)?;
+
+    let work = scan_revwalk(&repo, &mut revwalk, None)?;
+    let new_commits = apply_scan_work(&repo, store, ref_name, work, run_patch_id)?;
+    finalize_scan(store, &repo, &current_oid)?;
+
+    Ok(ScanSummary {
+        new_commits,
         ref_oid: current_oid.to_string(),
         rewrite_detected: false,
     })
@@ -483,14 +617,14 @@ mod tests {
         let mut store = Store::open(&cache_dir).unwrap();
         let selected = selected_branch::ensure_selected_branch(&base, &store).unwrap();
 
-        let first = incremental_scan(&base, &mut store, &selected).unwrap();
+        let first = incremental_scan(&base, &mut store, &selected, true).unwrap();
         assert!(first.new_commits > 0);
         let coverage_oid = store.get_meta_value("coverage_since_oid").unwrap();
         assert_eq!(coverage_oid.as_deref(), Some(root_oid.as_str()));
         let coverage_utc = store.get_meta_value("coverage_since_utc").unwrap();
         assert!(coverage_utc.is_some());
 
-        let second = incremental_scan(&base, &mut store, &selected).unwrap();
+        let second = incremental_scan(&base, &mut store, &selected, true).unwrap();
         assert_eq!(second.new_commits, 0);
         let coverage_oid_again = store.get_meta_value("coverage_since_oid").unwrap();
         assert_eq!(coverage_oid_again.as_deref(), Some(root_oid.as_str()));
@@ -499,7 +633,7 @@ mod tests {
         run_git(&base, &["add", "."]);
         run_git(&base, &["commit", "-m", "change"]);
 
-        let third = incremental_scan(&base, &mut store, &selected).unwrap();
+        let third = incremental_scan(&base, &mut store, &selected, true).unwrap();
         assert_eq!(third.new_commits, 1);
         let coverage_oid_after = store.get_meta_value("coverage_since_oid").unwrap();
         assert_eq!(coverage_oid_after.as_deref(), Some(root_oid.as_str()));
@@ -520,12 +654,49 @@ mod tests {
         let mut store = Store::open(&cache_dir).unwrap();
         let selected = selected_branch::ensure_selected_branch(&base, &store).unwrap();
 
-        incremental_scan(&base, &mut store, &selected).unwrap();
+        incremental_scan(&base, &mut store, &selected, true).unwrap();
 
         let is_shallow = store.get_meta_bool("is_shallow").unwrap().unwrap_or(false);
         assert!(is_shallow);
         let coverage_oid = store.get_meta_value("coverage_since_oid").unwrap();
         assert_eq!(coverage_oid.as_deref(), Some(root_oid.as_str()));
+    }
+
+    #[test]
+    fn patch_id_signals_require_deep() {
+        let temp = tempdir().unwrap();
+        let base = real_path(temp.path());
+        init_repo(&base);
+
+        // Create a base commit for the file
+        std::fs::write(base.join("file.txt"), "hello").unwrap();
+        run_git(&base, &["add", "."]);
+        run_git(&base, &["commit", "-m", "chore: add file"]);
+
+        // Create a culprit commit
+        std::fs::write(base.join("file.txt"), "hello world").unwrap();
+        run_git(&base, &["add", "."]);
+        run_git(&base, &["commit", "-m", "feat: change"]);
+
+        // Manual revert commit (subject must include \"revert\" to be a candidate)
+        std::fs::write(base.join("file.txt"), "hello").unwrap();
+        run_git(&base, &["add", "."]);
+        run_git(&base, &["commit", "-m", "manual revert"]);
+
+        let cache_dir = base.join(".regret");
+        let mut store = Store::open(&cache_dir).unwrap();
+        let selected = selected_branch::ensure_selected_branch(&base, &store).unwrap();
+
+        // Without --deep, patch-id signals should not appear
+        incremental_scan(&base, &mut store, &selected, false).unwrap();
+        let (reverts, linked_fix) = store.get_signal_counts_by_type(&selected).unwrap();
+        assert_eq!(reverts, 0);
+        assert_eq!(linked_fix, 0);
+
+        // With --deep, patch-id signals should appear
+        incremental_scan(&base, &mut store, &selected, true).unwrap();
+        let (reverts, _) = store.get_signal_counts_by_type(&selected).unwrap();
+        assert!(reverts > 0);
     }
 
     #[test]
@@ -542,7 +713,7 @@ mod tests {
         let mut store = Store::open(&cache_dir).unwrap();
         let selected = selected_branch::ensure_selected_branch(&base, &store).unwrap();
 
-        let first = incremental_scan(&base, &mut store, &selected).unwrap();
+        let first = incremental_scan(&base, &mut store, &selected, true).unwrap();
         assert!(!first.rewrite_detected);
         let first_head = run_git(&base, &["rev-parse", "HEAD"]);
 
@@ -553,7 +724,7 @@ mod tests {
         run_git(&base, &["add", "."]);
         run_git(&base, &["commit", "-m", "rewrite"]);
 
-        let second = incremental_scan(&base, &mut store, &selected).unwrap();
+        let second = incremental_scan(&base, &mut store, &selected, true).unwrap();
         assert!(second.rewrite_detected);
 
         let head_after = run_git(&base, &["rev-parse", "HEAD"]);

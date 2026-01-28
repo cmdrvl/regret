@@ -1,0 +1,6 @@
+CULPRIT sha:1b39615 score=10 events=1 ttr_p50_h=0.1 culprit_date_utc=2024-01-01T00:05:00+00:00
+  subject: Change feature B
+
+EVIDENCE (sorted by evidence_time desc):
+  type         evidence_sha    evidence_date_utc    ttr_h   conf confidence_reason
+  revert       442dee9                2024-01-01      0.1   0.95 canonical_revert_line
