@@ -735,35 +735,25 @@ exit 0
         }
     }
 
-    if !created_files.is_empty() {
-        println!("Created:");
-        for file in &created_files {
-            println!("  {}", file);
-        }
+    // Summary output
+    let total_created = created_files.len();
+    let total_skipped = skipped_files.len();
+    let total_overwritten = overwritten_files.len();
+
+    if total_created > 0 && total_skipped == 0 {
+        println!("Initialized .regret/");
+    } else if total_created > 0 {
+        println!(
+            "Initialized .regret/ ({} new, {} existing)",
+            total_created, total_skipped
+        );
+    } else if total_overwritten > 0 {
+        println!("Reinitialized .regret/ ({} overwritten)", total_overwritten);
+    } else {
+        println!("Already initialized (.regret/ exists)");
     }
 
-    if !overwritten_files.is_empty() {
-        println!("Overwritten (--force):");
-        for file in &overwritten_files {
-            println!("  {}", file);
-        }
-    }
-
-    if !skipped_files.is_empty() {
-        println!("Skipped (exists):");
-        for file in &skipped_files {
-            println!("  {}", file);
-        }
-    }
-
-    // Print next steps
-    println!("\nNext steps:");
-    println!("  git config commit.template .regret/commit-template.txt");
-    println!("  git config --unset commit.template");
-    println!("\nHook (optional, local repo):");
-    println!("  cp .regret/hooks/commit-msg .git/hooks/commit-msg");
-    println!("  chmod +x .git/hooks/commit-msg");
-    println!("  (If you already have a commit-msg hook, merge manually)");
+    println!("\nSee .regret/ADOPTION.md for setup options (commit template, hooks, CI).");
 
     Ok(())
 }
@@ -1184,6 +1174,7 @@ fn run_ranking_output(
             window_hint: window_hint.clone(),
             min_confidence,
             reason,
+            regret_initialized: std::path::Path::new(".regret").exists(),
         });
     }
 

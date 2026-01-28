@@ -298,6 +298,7 @@ pub struct NoEventsInfo {
     pub window_hint: Option<String>,
     pub min_confidence: f64,
     pub reason: NoEventsReason,
+    pub regret_initialized: bool,
 }
 
 /// Print the NO_EVENTS activation block per §10.1.6.
@@ -327,7 +328,9 @@ pub fn print_no_events(info: &NoEventsInfo) {
             }
         }
         NoEventsReason::NoSignalsDetected => {
-            println!("NEXT: regret --init");
+            if !info.regret_initialized {
+                println!("NEXT: regret --init");
+            }
             println!("NEXT: git config commit.template .regret/commit-template.txt");
         }
         NoEventsReason::SignalsOutsideWindowOrThreshold => {

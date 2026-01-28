@@ -1,16 +1,3 @@
-Created:
-  commit-template.txt
-  ADOPTION.md
-  agent-snippets/regret-linked-fix.md
-  agent-snippets/regret-session-context.md
-  ci/github-actions-regret.yml
-  hooks/commit-msg
+Initialized .regret/
 
-Next steps:
-  git config commit.template .regret/commit-template.txt
-  git config --unset commit.template
-
-Hook (optional, local repo):
-  cp .regret/hooks/commit-msg .git/hooks/commit-msg
-  chmod +x .git/hooks/commit-msg
-  (If you already have a commit-msg hook, merge manually)
+See .regret/ADOPTION.md for setup options (commit template, hooks, CI).
