@@ -38,6 +38,9 @@ pub fn assert_snapshot(snapshot_name: &str, output: &str) {
     }
 
     let expected = fs::read_to_string(&snapshot_path).expect("read snapshot");
+    // Normalize line endings for cross-platform compatibility
+    // (git may checkout with CRLF on Windows)
+    let expected = expected.replace("\r\n", "\n");
     assert_eq!(output, expected, "snapshot mismatch: {snapshot_name}");
 }
 
