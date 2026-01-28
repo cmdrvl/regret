@@ -31,3 +31,6 @@ target
 
 # ntm local logs/pids
 .ntm/
+
+# regret local cache database
+.regret/cache.db
