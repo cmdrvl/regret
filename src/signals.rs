@@ -85,6 +85,12 @@ static LINKED_FIX_TRAILER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^Fixes-(Commit|SHA):\s*([0-9a-fA-F]{7,40})\s*$").expect("invalid regex")
 });
 
+/// Regex for evidence candidate subjects: contains "revert" or "rollback" (case-insensitive).
+/// Per §8.2 A): Evidence candidates are commits whose SUBJECT contains "revert" or "rollback".
+static EVIDENCE_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)revert|rollback").expect("invalid regex")
+});
+
 /// Detect canonical revert lines in a commit body.
 ///
 /// Per §8.1: Pattern is "This reverts commit <40-hex-sha>."
@@ -165,6 +171,38 @@ pub fn create_linked_fix_signal(
         confidence: CONFIDENCE_LINKED_FIX,
         confidence_reason: ConfidenceReason::ExplicitTrailer,
         weight: WEIGHT_LINKED_FIX,
+        time_to_regret_hours,
+    })
+}
+
+/// Check if a commit subject indicates it's an evidence candidate for patch-ID matching.
+///
+/// Per §8.2 A): Evidence candidates are commits whose SUBJECT contains "revert" or "rollback"
+/// (ASCII case-insensitive byte scan).
+pub fn is_evidence_candidate(subject: &[u8]) -> bool {
+    EVIDENCE_CANDIDATE_REGEX.is_match(subject)
+}
+
+/// Create a patch-ID revert signal from matched data.
+///
+/// Per §8.2 G): confidence = 0.90, confidence_reason = patch_id_equivalence
+pub fn create_patch_id_revert_signal(
+    culprit_sha: String,
+    culprit_time_utc: &str,
+    evidence_sha: String,
+    evidence_time_utc: &str,
+) -> Result<DetectedSignal> {
+    let time_to_regret_hours =
+        calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
+
+    Ok(DetectedSignal {
+        signal_type: SignalType::Revert,
+        culprit_sha,
+        evidence_sha,
+        evidence_time_utc: evidence_time_utc.to_string(),
+        confidence: CONFIDENCE_PATCH_ID,
+        confidence_reason: ConfidenceReason::PatchIdEquivalence,
+        weight: WEIGHT_REVERT,
         time_to_regret_hours,
     })
 }
@@ -369,5 +407,34 @@ mod tests {
         let trailers = detect_linked_fix_trailers(body);
         assert_eq!(trailers.len(), 1);
         assert_eq!(trailers[0].sha_prefix, "abc1234def");
+    }
+
+    // Evidence candidate tests (patch-ID revert matching)
+
+    #[test]
+    fn detects_revert_in_subject() {
+        assert!(is_evidence_candidate(b"Revert: Remove broken feature"));
+        assert!(is_evidence_candidate(b"revert some changes"));
+        assert!(is_evidence_candidate(b"REVERT THE BUG FIX"));
+    }
+
+    #[test]
+    fn detects_rollback_in_subject() {
+        assert!(is_evidence_candidate(b"Rollback: emergency fix"));
+        assert!(is_evidence_candidate(b"rollback migration"));
+        assert!(is_evidence_candidate(b"ROLLBACK CHANGES"));
+    }
+
+    #[test]
+    fn rejects_normal_subjects() {
+        assert!(!is_evidence_candidate(b"Fix the bug"));
+        assert!(!is_evidence_candidate(b"Add new feature"));
+        assert!(!is_evidence_candidate(b"Update documentation"));
+    }
+
+    #[test]
+    fn detects_revert_anywhere_in_subject() {
+        assert!(is_evidence_candidate(b"[WIP] Partial revert of feature X"));
+        assert!(is_evidence_candidate(b"This commit reverts bad changes"));
     }
 }

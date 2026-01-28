@@ -215,6 +215,20 @@ impl Store {
         Ok(exists)
     }
 
+    /// Check if there's already a revert signal for a given evidence SHA.
+    pub(crate) fn has_revert_signal_for_evidence(&self, evidence_sha: &str) -> Result<bool> {
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM signal WHERE evidence_sha=?1 AND type='revert'",
+                [evidence_sha],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        Ok(exists)
+    }
+
     /// Get the patch_id for a commit (20 bytes, stored as BLOB).
     pub(crate) fn get_patch_id(&self, sha: &str) -> Result<Option<[u8; 20]>> {
         let result: Option<Vec<u8>> = self
@@ -275,6 +289,55 @@ impl Store {
             params![patch_id_rev.as_slice(), sha],
         )?;
         Ok(())
+    }
+
+    /// Get evidence candidates: commits with "revert" or "rollback" in subject.
+    /// Returns (sha, time_utc, subject) tuples.
+    pub(crate) fn get_evidence_candidates(&self) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sha, time_utc, subject FROM \"commit\" \
+             WHERE subject LIKE '%revert%' COLLATE NOCASE \
+                OR subject LIKE '%rollback%' COLLATE NOCASE \
+             ORDER BY time_utc DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Get potential culprits: commits before the evidence time, after coverage start.
+    /// Returns (sha, time_utc) tuples ordered by time descending (most recent first).
+    pub(crate) fn get_potential_culprits(
+        &self,
+        evidence_time_utc: &str,
+        coverage_since_utc: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sha, time_utc FROM \"commit\" \
+             WHERE time_utc <= ?1 AND time_utc >= ?2 \
+             ORDER BY time_utc DESC, sha ASC",
+        )?;
+
+        let rows = stmt.query_map([evidence_time_utc, coverage_since_utc], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
     }
 
     /// Run database diagnostics and return formatted results

@@ -1,4 +1,5 @@
 use crate::fast_path;
+use crate::patch_id::{self, PatchId};
 use crate::shallow;
 use crate::signals::{self, DetectedSignal};
 use crate::store::{CommitRow, Store};
@@ -208,10 +209,17 @@ pub(crate) fn incremental_scan(
         }
     }
 
-    // Insert detected signals
+    // Insert detected signals from canonical reverts and linked-fix trailers
     if !detected_signals.is_empty() {
         store.insert_signals(ref_name, &detected_signals)?;
     }
+
+    // Run patch-ID matching for manual reverts (§8.2)
+    let patch_id_signals = run_patch_id_matching(&repo, store, ref_name)?;
+    if !patch_id_signals.is_empty() {
+        store.insert_signals(ref_name, &patch_id_signals)?;
+    }
+
     fast_path::set_last_scanned_oids(store, &current_oid.to_string(), &current_oid.to_string())?;
     store.set_meta_bool(META_CACHE_VALID, true)?;
     store.set_meta_bool(META_COVERAGE_VALID, true)?;
@@ -237,6 +245,139 @@ pub(crate) fn incremental_scan(
         ref_oid: current_oid.to_string(),
         rewrite_detected: false,
     })
+}
+
+/// Run patch-ID matching algorithm (§8.2) to find manual reverts.
+///
+/// Algorithm:
+/// A) Evidence candidates: commits with "revert" or "rollback" in subject
+/// C) Match when patch_id(E) == patch_id_rev(C)
+/// D) Search bounds: C.time_utc <= E.time_utc && C.time_utc >= coverage_since_utc
+/// E) Collision resolution: choose max(C.time_utc), tie-break lexical SHA
+fn run_patch_id_matching(
+    repo: &Repository,
+    store: &mut Store,
+    _ref_name: &str,
+) -> Result<Vec<DetectedSignal>> {
+    let mut detected_signals = Vec::new();
+
+    // Get coverage start time
+    let coverage_since_utc = match store.get_meta_value(META_COVERAGE_SINCE_UTC)? {
+        Some(time) if !time.is_empty() => time,
+        _ => return Ok(detected_signals), // No coverage, skip
+    };
+
+    // Get evidence candidates (commits with revert/rollback in subject)
+    let evidence_candidates = store.get_evidence_candidates()?;
+
+    for (evidence_sha, evidence_time_utc, _subject) in evidence_candidates {
+        // Skip if we already have a signal for this evidence (from canonical revert line)
+        // We check by looking for any signal with this evidence_sha
+        // Note: This is a simplified check - in production might want a dedicated method
+        if has_revert_signal_for_evidence(store, &evidence_sha)? {
+            continue;
+        }
+
+        // Compute patch_id for evidence
+        let evidence_patch_id = match compute_and_cache_patch_id(repo, store, &evidence_sha)? {
+            Some(pid) => pid,
+            None => continue, // Empty diff, skip
+        };
+
+        // Get potential culprits (commits before evidence, after coverage start)
+        let culprits = store.get_potential_culprits(&evidence_time_utc, &coverage_since_utc)?;
+
+        // Find matching culprit (first match is best due to ordering: time desc, sha asc)
+        let mut best_match: Option<(String, String)> = None;
+
+        for (culprit_sha, culprit_time_utc) in culprits {
+            // Skip the evidence commit itself
+            if culprit_sha == evidence_sha {
+                continue;
+            }
+
+            // Skip if signal already exists
+            if store.signal_exists(&culprit_sha, &evidence_sha)? {
+                continue;
+            }
+
+            // Compute patch_id_rev for culprit
+            let culprit_patch_id_rev =
+                match compute_and_cache_patch_id_rev(repo, store, &culprit_sha)? {
+                    Some(pid) => pid,
+                    None => continue, // Empty diff, skip
+                };
+
+            // Check for match
+            if evidence_patch_id == culprit_patch_id_rev {
+                best_match = Some((culprit_sha, culprit_time_utc));
+                break; // First match is best due to ordering
+            }
+        }
+
+        // Emit signal for best match
+        if let Some((culprit_sha, culprit_time_utc)) = best_match {
+            if let Ok(signal) = signals::create_patch_id_revert_signal(
+                culprit_sha,
+                &culprit_time_utc,
+                evidence_sha,
+                &evidence_time_utc,
+            ) {
+                detected_signals.push(signal);
+            }
+        }
+    }
+
+    Ok(detected_signals)
+}
+
+/// Check if there's already a revert signal for this evidence commit.
+fn has_revert_signal_for_evidence(store: &Store, evidence_sha: &str) -> Result<bool> {
+    store.has_revert_signal_for_evidence(evidence_sha)
+}
+
+/// Compute and cache patch_id for a commit.
+fn compute_and_cache_patch_id(
+    repo: &Repository,
+    store: &mut Store,
+    sha: &str,
+) -> Result<Option<PatchId>> {
+    // Check cache first
+    if let Some(bytes) = store.get_patch_id(sha)? {
+        return Ok(Some(PatchId(bytes)));
+    }
+
+    // Compute
+    let patch_id = patch_id::compute_patch_id(repo, sha)?;
+
+    // Cache if computed
+    if let Some(ref pid) = patch_id {
+        store.set_patch_id(sha, pid.as_bytes())?;
+    }
+
+    Ok(patch_id)
+}
+
+/// Compute and cache patch_id_rev for a commit.
+fn compute_and_cache_patch_id_rev(
+    repo: &Repository,
+    store: &mut Store,
+    sha: &str,
+) -> Result<Option<PatchId>> {
+    // Check cache first
+    if let Some(bytes) = store.get_patch_id_rev(sha)? {
+        return Ok(Some(PatchId(bytes)));
+    }
+
+    // Compute
+    let patch_id_rev = patch_id::compute_patch_id_rev(repo, sha)?;
+
+    // Cache if computed
+    if let Some(ref pid) = patch_id_rev {
+        store.set_patch_id_rev(sha, pid.as_bytes())?;
+    }
+
+    Ok(patch_id_rev)
 }
 
 fn commit_time_utc(commit: &git2::Commit<'_>) -> Result<String> {
