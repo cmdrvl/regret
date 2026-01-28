@@ -800,6 +800,74 @@ pub fn print_explain_ndjson(info: &ExplainInfo) {
     }
 }
 
+/// Print HOTSPOT line in human-readable format.
+#[allow(dead_code)]
+pub fn print_hotspot(path: &str, score: i64, events: usize, culprits: usize) {
+    println!();
+    println!(
+        "HOTSPOT path={} score={} events={} culprits={}",
+        path, score, events, culprits
+    );
+}
+
+/// NDJSON record for a hotspot.
+#[derive(serde::Serialize)]
+struct NdjsonHotspot<'a> {
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    path: &'a str,
+    score: i64,
+    events: usize,
+    culprits: usize,
+}
+
+/// Print HOTSPOT as NDJSON record.
+#[allow(dead_code)]
+pub fn print_hotspot_ndjson(path: &str, score: i64, events: usize, culprits: usize) {
+    let record = NdjsonHotspot {
+        record_type: "hotspot",
+        path,
+        score,
+        events,
+        culprits,
+    };
+    println!("{}", serde_json::to_string(&record).expect("serialize hotspot"));
+}
+
+/// Print TOP_SURFACE line in human-readable format (fallback when no hotspot).
+#[allow(dead_code)]
+pub fn print_top_surface(path: &str, score: i64, events: usize, culprits: usize) {
+    println!();
+    println!(
+        "TOP_SURFACE path={} score={} events={} culprits={}",
+        path, score, events, culprits
+    );
+}
+
+/// NDJSON record for a top surface (fallback).
+#[derive(serde::Serialize)]
+struct NdjsonTopSurface<'a> {
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    path: &'a str,
+    score: i64,
+    events: usize,
+    culprits: usize,
+}
+
+/// Print TOP_SURFACE as NDJSON record (fallback when no hotspot).
+#[allow(dead_code)]
+pub fn print_top_surface_ndjson(path: &str, score: i64, events: usize, culprits: usize) {
+    let record = NdjsonTopSurface {
+        record_type: "top_surface",
+        path,
+        score,
+        events,
+        culprits,
+    };
+    println!("{}", serde_json::to_string(&record).expect("serialize top_surface"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -51,6 +51,12 @@ hex = "0.4"
 # TOML config file parsing
 toml = "0.8"
 
+# Blake3 hashing for file sets
+blake3 = "1.5"
+
+# Glob pattern matching for ignore patterns
+globset = "0.4"
+
 # Windows file locking
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "winbase", "minwinbase"] }

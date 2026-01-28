@@ -32,8 +32,7 @@ pub(crate) struct DiagnosticResults {
 }
 
 pub(crate) struct Store {
-    #[allow(dead_code)]
-    conn: Connection,
+    pub(crate) conn: Connection,
     #[allow(dead_code)]
     path: PathBuf,
 }

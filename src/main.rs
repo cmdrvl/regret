@@ -8,6 +8,8 @@ use std::time::Duration as StdDuration;
 mod cache_path;
 mod config_file;
 mod fast_path;
+mod fileset;
+mod hotspot;
 mod output;
 mod patch_id;
 mod path_validation;
