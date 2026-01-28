@@ -700,7 +700,7 @@ fn run(config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Run the default ranking output (header + TOP table).
+/// Run the default ranking output (header + TOP table + RATE + COVERAGE/NO_EVENTS).
 fn run_ranking_output(
     config: &Config,
     store: &store::Store,
@@ -715,10 +715,15 @@ fn run_ranking_output(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
+    // Get coverage info
+    let coverage_since_utc = store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)?;
+    let coverage_valid_str = store.get_meta_value("coverage_valid")?;
+    let coverage_valid = coverage_valid_str.as_deref() == Some("1");
+
     // Compute coverage days
-    let coverage_days = match store.get_meta_value(scan::META_COVERAGE_SINCE_UTC)? {
+    let coverage_days = match &coverage_since_utc {
         Some(since_utc) => {
-            if let Ok(since) = DateTime::parse_from_rfc3339(&since_utc) {
+            if let Ok(since) = DateTime::parse_from_rfc3339(since_utc) {
                 let now = Utc::now();
                 let duration = now.signed_duration_since(since);
                 Some(duration.num_days() as u64)
@@ -749,9 +754,65 @@ fn run_ranking_output(
     let min_confidence = config.min_confidence.unwrap_or(0.0);
     let ranked = output::aggregate_culprits(&signals, min_confidence);
 
-    // Print TOP table
+    // Count events (total number of signals that pass confidence threshold)
+    let events = ranked.iter().map(|c| c.events).sum();
+
+    // Print TOP table (if we have culprits)
     let limit = config.limit.unwrap_or(5) as usize;
     output::print_top_table(&ranked, limit);
+
+    // Print RATE line (always)
+    println!();
+    output::print_rate(&output::RateInfo {
+        events,
+        commits: scanned_commits,
+    });
+
+    // Determine coverage status
+    let coverage_status = if !coverage_valid {
+        output::CoverageStatus::Invalid
+    } else if coverage_since_utc.is_none() || coverage_days.is_none() {
+        output::CoverageStatus::Incomplete
+    } else {
+        output::CoverageStatus::Complete
+    };
+
+    // Print COVERAGE line (only when incomplete or invalid)
+    if coverage_status != output::CoverageStatus::Complete {
+        output::print_coverage(
+            &output::CoverageInfo {
+                status: coverage_status,
+                coverage_since_utc: coverage_since_utc.clone().unwrap_or_default(),
+                coverage_valid,
+            },
+            coverage_days,
+        );
+    }
+
+    // Print NO_EVENTS block (when zero events)
+    if events == 0 {
+        let (reverts_detected, linked_fix_detected) = store.get_signal_counts_by_type(selected)?;
+
+        // Determine reason for no events
+        let reason = if coverage_status == output::CoverageStatus::Incomplete
+            || coverage_status == output::CoverageStatus::Invalid
+        {
+            output::NoEventsReason::CoverageIncomplete
+        } else if reverts_detected == 0 && linked_fix_detected == 0 {
+            output::NoEventsReason::NoSignalsDetected
+        } else {
+            // Signals exist but outside window or filtered by confidence
+            output::NoEventsReason::SignalsOutsideWindow
+        };
+
+        println!();
+        output::print_no_events(&output::NoEventsInfo {
+            reverts_detected,
+            linked_fix_trailers: linked_fix_detected,
+            coverage_days,
+            reason,
+        });
+    }
 
     Ok(())
 }

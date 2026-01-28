@@ -168,6 +168,138 @@ pub fn median(values: &mut [f64]) -> f64 {
     }
 }
 
+/// Info for RATE line per §10.1.4.
+pub struct RateInfo {
+    pub events: usize,
+    pub commits: usize,
+}
+
+/// Print the RATE line per §10.1.4.
+///
+/// Format: RATE events_per_100_commits=<x> events=<e> commits=<c>
+pub fn print_rate(info: &RateInfo) {
+    let rate = if info.commits > 0 {
+        (info.events as f64 / info.commits as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    println!(
+        "RATE events_per_100_commits={:.2} events={} commits={}",
+        rate, info.events, info.commits
+    );
+}
+
+/// Coverage status per §10.1.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageStatus {
+    Complete,
+    Incomplete,
+    Invalid,
+}
+
+impl CoverageStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CoverageStatus::Complete => "complete",
+            CoverageStatus::Incomplete => "incomplete",
+            CoverageStatus::Invalid => "invalid",
+        }
+    }
+}
+
+/// Info for COVERAGE line per §10.1.5.
+pub struct CoverageInfo {
+    pub status: CoverageStatus,
+    pub coverage_since_utc: String,
+    pub coverage_valid: bool,
+}
+
+/// Print the COVERAGE line per §10.1.5 (only when incomplete or invalid).
+///
+/// Format: COVERAGE status=<status> coverage_since_utc=<ts> coverage_valid=<0|1>
+/// NEXT: regret --scan --since <window> (or --all for invalid)
+pub fn print_coverage(info: &CoverageInfo, window_days: Option<u64>) {
+    if info.status == CoverageStatus::Complete {
+        return;
+    }
+
+    println!(
+        "COVERAGE status={} coverage_since_utc={} coverage_valid={}",
+        info.status.as_str(),
+        info.coverage_since_utc,
+        if info.coverage_valid { "1" } else { "0" }
+    );
+
+    match info.status {
+        CoverageStatus::Incomplete => {
+            let window = window_days.unwrap_or(30);
+            println!("NEXT: regret --scan --since {}d", window);
+        }
+        CoverageStatus::Invalid => {
+            println!("NEXT: regret --scan --all");
+        }
+        CoverageStatus::Complete => {}
+    }
+}
+
+/// Reason for NO_EVENTS per §10.1.6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoEventsReason {
+    CoverageIncomplete,
+    NoSignalsDetected,
+    SignalsOutsideWindow,
+}
+
+impl NoEventsReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NoEventsReason::CoverageIncomplete => "coverage_incomplete",
+            NoEventsReason::NoSignalsDetected => "no_signals_detected",
+            NoEventsReason::SignalsOutsideWindow => "signals_outside_window",
+        }
+    }
+}
+
+/// Info for NO_EVENTS block per §10.1.6.
+pub struct NoEventsInfo {
+    pub reverts_detected: usize,
+    pub linked_fix_trailers: usize,
+    pub coverage_days: Option<u64>,
+    pub reason: NoEventsReason,
+}
+
+/// Print the NO_EVENTS activation block per §10.1.6.
+///
+/// Format:
+/// NO_EVENTS reverts_detected=<n> linked_fix_trailers=<n> coverage_days=<n>
+/// REASON: <reason>
+/// NEXT: <command>
+pub fn print_no_events(info: &NoEventsInfo) {
+    let coverage_str = match info.coverage_days {
+        Some(days) => days.to_string(),
+        None => "?".to_string(),
+    };
+
+    println!(
+        "NO_EVENTS reverts_detected={} linked_fix_trailers={} coverage_days={}",
+        info.reverts_detected, info.linked_fix_trailers, coverage_str
+    );
+    println!("REASON: {}", info.reason.as_str());
+
+    match info.reason {
+        NoEventsReason::CoverageIncomplete => {
+            println!("NEXT: regret --scan --all");
+        }
+        NoEventsReason::NoSignalsDetected => {
+            println!("NEXT: git log --oneline | head -20 # verify recent commit activity");
+        }
+        NoEventsReason::SignalsOutsideWindow => {
+            println!("NEXT: regret --since 90d # widen ranking window");
+        }
+    }
+}
+
 /// Aggregate signal row from database.
 #[derive(Debug, Clone)]
 pub struct SignalRow {

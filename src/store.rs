@@ -537,6 +537,30 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM \"commit\"", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+
+    /// Get signal counts by type for a branch.
+    /// Returns (reverts, linked_fix) counts.
+    pub(crate) fn get_signal_counts_by_type(&self, ref_name: &str) -> Result<(usize, usize)> {
+        let reverts: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM signal WHERE ref=?1 AND type='revert'",
+                [ref_name],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let linked_fix: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM signal WHERE ref=?1 AND type='linked_fix'",
+                [ref_name],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        Ok((reverts as usize, linked_fix as usize))
+    }
 }
 
 fn ensure_db_file(path: &Path) -> Result<()> {
