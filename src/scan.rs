@@ -16,6 +16,47 @@ const META_COVERAGE_SINCE_UTC: &str = "coverage_since_utc";
 const META_COVERAGE_SINCE_OID: &str = "coverage_since_oid";
 const META_IS_SHALLOW: &str = "is_shallow";
 
+/// Result of resolving a SHA prefix against the repository.
+enum ShaResolution {
+    /// Prefix resolved to a unique full SHA
+    Unique(String),
+    /// Prefix was ambiguous (multiple matches)
+    Ambiguous,
+    /// Prefix did not match any commit
+    NotFound,
+}
+
+/// Resolve a SHA prefix (7-40 chars) to a full SHA.
+/// Returns Unique if exactly one commit matches, Ambiguous if multiple, NotFound if none.
+fn resolve_sha_prefix(repo: &Repository, prefix: &str) -> ShaResolution {
+    // Try to parse as a full or partial OID
+    let oid = match Oid::from_str(prefix) {
+        Ok(oid) => oid,
+        Err(_) => return ShaResolution::NotFound,
+    };
+
+    // For full 40-char SHAs, just check if the commit exists
+    if prefix.len() == 40 {
+        return match repo.find_commit(oid) {
+            Ok(_) => ShaResolution::Unique(prefix.to_lowercase()),
+            Err(_) => ShaResolution::NotFound,
+        };
+    }
+
+    // For prefixes, use revparse_single which handles ambiguity
+    match repo.revparse_single(prefix) {
+        Ok(obj) => {
+            if obj.kind() == Some(git2::ObjectType::Commit) {
+                ShaResolution::Unique(obj.id().to_string())
+            } else {
+                ShaResolution::NotFound
+            }
+        }
+        Err(e) if e.code() == git2::ErrorCode::Ambiguous => ShaResolution::Ambiguous,
+        Err(_) => ShaResolution::NotFound,
+    }
+}
+
 pub(crate) struct ScanSummary {
     pub(crate) new_commits: usize,
     #[allow(dead_code)]
@@ -62,7 +103,10 @@ pub(crate) fn incremental_scan(
     }
 
     let mut rows: Vec<CommitRow> = Vec::new();
-    let mut pending_signals: Vec<(String, String, Vec<String>)> = Vec::new(); // (evidence_sha, evidence_time, culprit_shas)
+    // Pending canonical revert signals: (evidence_sha, evidence_time, culprit_shas)
+    let mut pending_revert_signals: Vec<(String, String, Vec<String>)> = Vec::new();
+    // Pending linked-fix signals: (evidence_sha, evidence_time, sha_prefixes)
+    let mut pending_linked_fix_signals: Vec<(String, String, Vec<String>)> = Vec::new();
 
     for oid_result in revwalk {
         let oid = oid_result?;
@@ -73,11 +117,20 @@ pub(crate) fn incremental_scan(
         let pr_number = subject.as_ref().and_then(|s| parse_pr_number(s));
         let pr_source = pr_number.as_ref().map(|_| "merge_commit".to_string());
 
-        // Detect canonical revert signals in commit body
+        // Detect signals in commit body
         if let Some(body) = commit.body_bytes() {
+            // Canonical revert lines (§8.1)
             let culprit_shas = signals::detect_canonical_reverts(body);
             if !culprit_shas.is_empty() {
-                pending_signals.push((oid.to_string(), time_utc.clone(), culprit_shas));
+                pending_revert_signals.push((oid.to_string(), time_utc.clone(), culprit_shas));
+            }
+
+            // Linked-fix trailers (§8.3)
+            let trailers = signals::detect_linked_fix_trailers(body);
+            if !trailers.is_empty() {
+                let sha_prefixes: Vec<String> =
+                    trailers.into_iter().map(|t| t.sha_prefix).collect();
+                pending_linked_fix_signals.push((oid.to_string(), time_utc.clone(), sha_prefixes));
             }
         }
 
@@ -94,7 +147,9 @@ pub(crate) fn incremental_scan(
 
     // Process pending signals now that commits are in the store
     let mut detected_signals: Vec<DetectedSignal> = Vec::new();
-    for (evidence_sha, evidence_time_utc, culprit_shas) in pending_signals {
+
+    // Process canonical revert signals (§8.1)
+    for (evidence_sha, evidence_time_utc, culprit_shas) in pending_revert_signals {
         for culprit_sha in culprit_shas {
             // Skip if signal already exists
             if store.signal_exists(&culprit_sha, &evidence_sha)? {
@@ -104,6 +159,43 @@ pub(crate) fn incremental_scan(
             // Look up culprit time from store
             if let Some(culprit_time_utc) = store.get_commit_time(&culprit_sha)? {
                 if let Ok(signal) = signals::create_canonical_revert_signal(
+                    culprit_sha,
+                    &culprit_time_utc,
+                    evidence_sha.clone(),
+                    &evidence_time_utc,
+                ) {
+                    detected_signals.push(signal);
+                }
+            }
+            // If culprit not in store, we skip (it may be outside our scan window)
+        }
+    }
+
+    // Process linked-fix signals (§8.3)
+    for (evidence_sha, evidence_time_utc, sha_prefixes) in pending_linked_fix_signals {
+        for sha_prefix in sha_prefixes {
+            // Resolve SHA prefix against repository
+            let culprit_sha = match resolve_sha_prefix(&repo, &sha_prefix) {
+                ShaResolution::Unique(sha) => sha,
+                ShaResolution::Ambiguous => {
+                    // Per spec: ambiguous prefix = NO signal, debug diagnostic only
+                    // TODO: Add --debug diagnostic output
+                    continue;
+                }
+                ShaResolution::NotFound => {
+                    // Prefix doesn't match any commit in repo
+                    continue;
+                }
+            };
+
+            // Skip if signal already exists
+            if store.signal_exists(&culprit_sha, &evidence_sha)? {
+                continue;
+            }
+
+            // Look up culprit time from store
+            if let Some(culprit_time_utc) = store.get_commit_time(&culprit_sha)? {
+                if let Ok(signal) = signals::create_linked_fix_signal(
                     culprit_sha,
                     &culprit_time_utc,
                     evidence_sha.clone(),

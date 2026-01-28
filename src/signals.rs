@@ -78,6 +78,13 @@ static CANONICAL_REVERT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"This reverts commit ([0-9a-fA-F]{40})\.").expect("invalid regex")
 });
 
+/// Regex for linked-fix trailers: "Fixes-Commit: <sha>" or "Fixes-SHA: <sha>"
+/// Accepts 7-40 hex character prefixes (will be resolved against repo).
+/// The pattern matches trailers at the start of a line.
+static LINKED_FIX_TRAILER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^Fixes-(Commit|SHA):\s*([0-9a-fA-F]{7,40})\s*$").expect("invalid regex")
+});
+
 /// Detect canonical revert lines in a commit body.
 ///
 /// Per §8.1: Pattern is "This reverts commit <40-hex-sha>."
@@ -102,6 +109,64 @@ pub fn detect_canonical_reverts(body: &[u8]) -> Vec<String> {
     }
 
     culprits
+}
+
+/// A linked-fix trailer found in a commit message.
+/// The SHA prefix needs to be resolved against the repository.
+#[derive(Debug, Clone)]
+pub struct LinkedFixTrailer {
+    /// The SHA prefix (7-40 hex characters, lowercase)
+    pub sha_prefix: String,
+}
+
+/// Detect linked-fix trailers in a commit body.
+///
+/// Per §8.3: Trailers are "Fixes-Commit: <sha>" or "Fixes-SHA: <sha>"
+/// - Accept 7-40 hex prefixes
+/// - Must be resolved against local repo (caller responsibility)
+/// - Ambiguous prefix: NO signal (caller handles)
+///
+/// Returns all detected trailers for resolution.
+pub fn detect_linked_fix_trailers(body: &[u8]) -> Vec<LinkedFixTrailer> {
+    let mut trailers = Vec::new();
+
+    for cap in LINKED_FIX_TRAILER_REGEX.captures_iter(body) {
+        if let Some(sha_match) = cap.get(2) {
+            let sha_bytes = sha_match.as_bytes();
+            // Validate hex characters (regex should ensure this, but be safe)
+            if sha_bytes.len() >= 7
+                && sha_bytes.len() <= 40
+                && sha_bytes.iter().all(|b| b.is_ascii_hexdigit())
+            {
+                let sha = String::from_utf8_lossy(sha_bytes).to_lowercase();
+                trailers.push(LinkedFixTrailer { sha_prefix: sha });
+            }
+        }
+    }
+
+    trailers
+}
+
+/// Create a linked-fix signal from resolved data.
+pub fn create_linked_fix_signal(
+    culprit_sha: String,
+    culprit_time_utc: &str,
+    evidence_sha: String,
+    evidence_time_utc: &str,
+) -> Result<DetectedSignal> {
+    let time_to_regret_hours =
+        calculate_time_to_regret_hours(culprit_time_utc, evidence_time_utc)?;
+
+    Ok(DetectedSignal {
+        signal_type: SignalType::LinkedFix,
+        culprit_sha,
+        evidence_sha,
+        evidence_time_utc: evidence_time_utc.to_string(),
+        confidence: CONFIDENCE_LINKED_FIX,
+        confidence_reason: ConfidenceReason::ExplicitTrailer,
+        weight: WEIGHT_LINKED_FIX,
+        time_to_regret_hours,
+    })
 }
 
 /// Calculate time-to-regret in hours between culprit and evidence commits.
@@ -233,5 +298,76 @@ mod tests {
         let evidence = "2024-01-01T10:00:00Z";
         let hours = calculate_time_to_regret_hours(culprit, evidence).unwrap();
         assert_eq!(hours, 0.0);
+    }
+
+    // Linked-fix trailer tests
+
+    #[test]
+    fn detects_fixes_commit_trailer_full_sha() {
+        let body = b"Fix the bug\n\nFixes-Commit: abc1234567890def1234567890abc123456789de\n";
+        let trailers = detect_linked_fix_trailers(body);
+        assert_eq!(trailers.len(), 1);
+        assert_eq!(
+            trailers[0].sha_prefix,
+            "abc1234567890def1234567890abc123456789de"
+        );
+    }
+
+    #[test]
+    fn detects_fixes_sha_trailer() {
+        let body = b"Fix the bug\n\nFixes-SHA: abc1234567890def1234567890abc123456789de\n";
+        let trailers = detect_linked_fix_trailers(body);
+        assert_eq!(trailers.len(), 1);
+        assert_eq!(
+            trailers[0].sha_prefix,
+            "abc1234567890def1234567890abc123456789de"
+        );
+    }
+
+    #[test]
+    fn detects_short_sha_prefix() {
+        let body = b"Fix the bug\n\nFixes-Commit: abc1234\n";
+        let trailers = detect_linked_fix_trailers(body);
+        assert_eq!(trailers.len(), 1);
+        assert_eq!(trailers[0].sha_prefix, "abc1234");
+    }
+
+    #[test]
+    fn detects_multiple_linked_fix_trailers() {
+        let body = b"Fix multiple bugs\n\nFixes-Commit: 1111111\nFixes-SHA: 2222222\n";
+        let trailers = detect_linked_fix_trailers(body);
+        assert_eq!(trailers.len(), 2);
+        assert_eq!(trailers[0].sha_prefix, "1111111");
+        assert_eq!(trailers[1].sha_prefix, "2222222");
+    }
+
+    #[test]
+    fn ignores_sha_prefix_too_short() {
+        let body = b"Fix the bug\n\nFixes-Commit: abc123\n"; // 6 chars, need at least 7
+        let trailers = detect_linked_fix_trailers(body);
+        assert!(trailers.is_empty());
+    }
+
+    #[test]
+    fn ignores_inline_trailer_not_at_line_start() {
+        let body = b"Fix the bug with Fixes-Commit: abc1234567\n";
+        let trailers = detect_linked_fix_trailers(body);
+        assert!(trailers.is_empty());
+    }
+
+    #[test]
+    fn handles_whitespace_after_sha() {
+        let body = b"Fix the bug\n\nFixes-Commit: abc1234567   \n";
+        let trailers = detect_linked_fix_trailers(body);
+        assert_eq!(trailers.len(), 1);
+        assert_eq!(trailers[0].sha_prefix, "abc1234567");
+    }
+
+    #[test]
+    fn lowercases_sha_prefix() {
+        let body = b"Fix the bug\n\nFixes-Commit: ABC1234DEF\n";
+        let trailers = detect_linked_fix_trailers(body);
+        assert_eq!(trailers.len(), 1);
+        assert_eq!(trailers[0].sha_prefix, "abc1234def");
     }
 }
