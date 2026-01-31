@@ -2,6 +2,8 @@
 
 **Your git history already knows which commits caused problems. regret surfaces them.**
 
+*Built for a world where your swarm of AI agents collaborates on GitHub repos with mine.*
+
 ---
 
 ## Why This Exists
