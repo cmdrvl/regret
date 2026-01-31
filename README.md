@@ -1,6 +1,31 @@
 # regret
 
-`regret` is a single-verb, local-first, deterministic CLI that mines **high-precision regret signals** from git history and reports the top culprits with evidence.
+**Your git history already knows which commits caused problems. regret surfaces them.**
+
+---
+
+## Why This Exists
+
+Every codebase accumulates mistakes: commits that introduce bugs, regressions that slip through review, changes that get reverted or patched shortly after landing. The evidence is sitting right there in your git history—reverts, follow-up fixes, churn patterns—but surfacing it manually is tedious and error-prone.
+
+`regret` automates this. It mines your git history for high-confidence signals that a commit caused trouble, ranks the culprits, and shows you the evidence. No configuration, no external services, no training data. Just run `regret` and see what your history reveals.
+
+### What regret finds
+
+| Signal | What it means |
+|--------|--------------|
+| **Reverts** | A commit was explicitly undone—clear evidence of regret |
+| **Linked fixes** | A follow-up commit explicitly references the culprit it's fixing |
+| **Patch-id matches** | Same logical change applied twice (with `--deep`) |
+
+### Who this is for
+
+- **Solo developers** who want to spot patterns in their own work
+- **Teams** looking for data-driven insight into code quality
+- **CI pipelines** that want to flag high-churn commits automatically
+- **AI coding agents** that need structured evidence for debugging decisions
+
+---
 
 ## Install
 
