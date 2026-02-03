@@ -4,7 +4,7 @@
 
 ---
 
-## RULE 0 - THE FUNDAMENTAL OVERRIDE PEROGATIVE
+## RULE 0 - THE FUNDAMENTAL OVERRIDE PREROGATIVE
 
 If the user tells you to do something, even if it conflicts with what follows, YOU MUST LISTEN TO THE USER. The user is in charge.
 
@@ -38,6 +38,14 @@ Rules:
    - When you ran it
 
 If that audit trail is missing, act as if the operation never happened.
+
+### No Script-Based Code Changes
+
+**NEVER** run a script that processes or changes code files in this repo. Brittle regex-based transformations create far more problems than they solve.
+
+- **Always make code changes manually**, even when there are many instances
+- For many simple changes: use parallel subagents
+- For subtle/complex changes: do them methodically yourself
 
 ## RULE 2 - BEADS/BR DATABASE SAFETY (ABSOLUTE, IF USED)
 
@@ -234,6 +242,33 @@ Work is NOT complete until:
 
 ---
 
+## Multi-Agent Coordination Notes
+
+When working alongside other agents:
+
+- **Never stash, revert, or overwrite other agents' work**
+- Treat unexpected changes in the working tree as if you made them
+- If you see changes you didn't make in `git status`, those are from other agents working concurrently—commit them together with your changes
+- This is normal and happens frequently in multi-agent environments
+
+### CRITICAL: Never Ask About Unexpected Changes
+
+**NEVER stop working to ask about unexpected changes in the working tree.** The answer is always the same: those are changes created by other agents working on the project concurrently. This is not a rare occurrence—it happens multiple times per minute in active multi-agent environments.
+
+**The rule is simple:** You NEVER, under ANY circumstance, stash, revert, overwrite, or otherwise disturb the work of other agents. Treat those changes identically to changes you made yourself. Act as if YOU made those changes and simply don't recall doing so.
+
+**Do NOT:**
+- Stop and ask "I see unexpected changes, what should I do?"
+- Offer options like "triage these changes" or "run a full suite"
+- Express concern about uncommitted work you don't recognize
+
+**DO:**
+- Continue working as normal
+- Include those changes when you commit (they belong to the shared effort)
+- Trust that other agents know what they're doing
+
+---
+
 ## Tool Guidance
 
 ### ast-grep vs ripgrep
@@ -302,3 +337,7 @@ apr robot status --format toon
 ```
 
 ---
+
+## Note on Built-in TODO Functionality
+
+If the user explicitly asks you to use your built-in TODO functionality (task lists, checklists, etc.), do not refuse or insist on using Beads instead. You can use built-in TODOs when specifically instructed to do so. Always comply with such explicit requests — see Rule 0.
