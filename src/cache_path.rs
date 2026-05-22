@@ -4,7 +4,8 @@ use anyhow::{bail, Context, Result};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::path::{Path, PathBuf};
 
-const SYMLINK_ERROR: &str = "error: .regret/ contains a symlink component; refusing to write";
+const SYMLINK_ERROR: &str =
+    "error: regret managed path contains a symlink component; refusing to write";
 
 pub(crate) fn validate_cache_path(path: &Path) -> Result<()> {
     let mut cursor = PathBuf::new();

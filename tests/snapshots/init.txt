@@ -1,3 +1,3 @@
-Initialized .regret/
+Initialized <CMDRVL>/state/regret/repos/<REPO_ID>
 
-See .regret/ADOPTION.md for setup options (commit template, hooks, CI).
+See <CMDRVL>/state/regret/repos/<REPO_ID>/ADOPTION.md for setup options (commit template, hooks, CI).

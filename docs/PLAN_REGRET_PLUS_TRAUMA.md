@@ -121,7 +121,7 @@ regret --trauma-aware --trauma-file ~/.cass-memory/traumas.jsonl
 Create a common format for dangerous patterns that both tools consume:
 
 ```yaml
-# .regret/patterns.yaml or .cass/patterns.yaml
+# ~/.cmdrvl/config/regret/repos/<repo-id>/patterns.yaml or .cass/patterns.yaml
 version: 1
 patterns:
   - id: fs-recursive-delete
@@ -172,7 +172,7 @@ regret trauma-sync --push --min-confidence 0.8
 ### Phase 1: Documentation + Trailers (v0.2)
 - [ ] Add `Trauma-Ref:` trailer parsing (context only)
 - [ ] Document manual workflow in README
-- [ ] Add example in `.regret/agent-snippets/`
+- [ ] Add example under `~/.cmdrvl/state/regret/repos/<repo-id>/agent-snippets/`
 
 ### Phase 2: Export Suggestions (v0.3)
 - [ ] Implement `--suggest-traumas` flag
@@ -259,7 +259,7 @@ regret --ndjson --trauma-aware --fail-if "any_trauma_match and max_score > 20"
 5. **Opt-in vs opt-out**: Should trauma-awareness be:
    - Explicit flag (`--trauma-aware`)
    - Default if trauma file exists
-   - Config option in `.regret/config.toml`
+   - Config option in `~/.cmdrvl/config/regret/repos/<repo-id>/config.toml`
 
 ---
 

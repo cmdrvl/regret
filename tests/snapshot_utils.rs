@@ -1,4 +1,3 @@
-use assert_cmd::Command;
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,10 +5,18 @@ use std::path::{Path, PathBuf};
 const UPDATE_ENV: &str = "REGRET_UPDATE_SNAPSHOTS";
 
 pub fn run_regret(repo_path: &Path, args: &[&str]) -> String {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("regret"));
+    let mut command = assert_cmd::cargo::cargo_bin_cmd!("regret");
+    let fixture_root = repo_path
+        .parent()
+        .expect("fixture repo parent")
+        .canonicalize()
+        .expect("canonical fixture root");
+    let home = fixture_root.join("home");
     let output = command
         .current_dir(repo_path)
         .args(args)
+        .env("HOME", &home)
+        .env_remove("USERPROFILE")
         .env("TZ", "UTC")
         .env("LC_ALL", "C")
         .env("LANG", "C")
@@ -60,17 +67,27 @@ pub fn normalize_output(raw: &str, repo_path: &Path) -> String {
     normalized = normalized.replace('\\', "/");
 
     let repo_string = repo_path.to_string_lossy().replace('\\', "/");
-    let cache_string = repo_path
-        .join(".regret")
+    let cmdrvl_string = repo_path
+        .parent()
+        .expect("fixture repo parent")
+        .canonicalize()
+        .expect("canonical fixture root")
+        .join("home")
+        .join(".cmdrvl")
         .to_string_lossy()
         .replace('\\', "/");
 
     if !repo_string.is_empty() {
         normalized = normalized.replace(&repo_string, "<REPO>");
     }
-    if !cache_string.is_empty() {
-        normalized = normalized.replace(&cache_string, "<CACHE>");
+    if !cmdrvl_string.is_empty() {
+        normalized = normalized.replace(&cmdrvl_string, "<CMDRVL>");
     }
+
+    let cmdrvl_repo_path_re = Regex::new(r"/repos/[a-f0-9]{64}").expect("cmdrvl repo path regex");
+    normalized = cmdrvl_repo_path_re
+        .replace_all(&normalized, "/repos/<REPO_ID>")
+        .into_owned();
 
     // Normalize JSON repo_id
     let repo_id_re = Regex::new(r#""repo_id"\s*:\s*"[a-f0-9]{8,}""#).expect("repo_id regex");

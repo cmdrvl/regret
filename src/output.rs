@@ -5,9 +5,8 @@
 //! - TOP culprits table (§10.1.2)
 //! - NDJSON meta and stat records (§10.2)
 
-use blake3::Hasher;
+use crate::paths;
 use chrono::{DateTime, Utc};
-use git2::Repository;
 use serde::Serialize;
 
 /// Summary information for the header line.
@@ -299,6 +298,7 @@ pub struct NoEventsInfo {
     pub min_confidence: f64,
     pub reason: NoEventsReason,
     pub regret_initialized: bool,
+    pub commit_template_path: String,
 }
 
 /// Print the NO_EVENTS activation block per §10.1.6.
@@ -331,7 +331,10 @@ pub fn print_no_events(info: &NoEventsInfo) {
             if !info.regret_initialized {
                 println!("NEXT: regret --init");
             }
-            println!("NEXT: git config commit.template .regret/commit-template.txt");
+            println!(
+                "NEXT: git config commit.template {}",
+                info.commit_template_path
+            );
         }
         NoEventsReason::SignalsOutsideWindowOrThreshold => {
             let longer_window = info.window_days.map_or(90, |window| {
@@ -469,49 +472,12 @@ pub struct NdjsonInfo<'a> {
     pub signals: &'a [SignalRow],
 }
 
-/// Compute a stable repo_id from the git common dir (blake3 hex).
-pub fn compute_repo_id(repo_path: &std::path::Path) -> String {
-    let git_dir = Repository::discover(repo_path)
-        .ok()
-        .map(|repo| repo.path().to_path_buf())
-        .unwrap_or_else(|| repo_path.to_path_buf());
-    let common_dir = resolve_common_dir(&git_dir);
-    let canonical = std::fs::canonicalize(&common_dir).unwrap_or(common_dir);
-
-    let mut hasher = Hasher::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    hex::encode(digest.as_bytes())
-}
-
-fn resolve_common_dir(git_dir: &std::path::Path) -> std::path::PathBuf {
-    let commondir_path = git_dir.join("commondir");
-    let commondir = match std::fs::read_to_string(&commondir_path) {
-        Ok(contents) => {
-            let trimmed = contents.trim();
-            if trimmed.is_empty() {
-                git_dir.to_path_buf()
-            } else {
-                let candidate = std::path::Path::new(trimmed);
-                if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    git_dir.join(candidate)
-                }
-            }
-        }
-        Err(_) => git_dir.to_path_buf(),
-    };
-
-    commondir
-}
-
 /// Print NDJSON output (meta + stat + rank + evidence records).
 ///
 /// Output goes to stdout as newline-delimited JSON.
 /// Order: meta (one), stat records, rank records, evidence records
 pub fn print_ndjson(info: &NdjsonInfo) {
-    let repo_id = compute_repo_id(&info.repo_path);
+    let repo_id = paths::compute_repo_id(&info.repo_path);
 
     // 1. Meta record (exactly one, first)
     let meta = NdjsonMeta {
@@ -759,7 +725,7 @@ pub fn print_no_signals(sha: &str) {
 
 /// Print NO_SIGNALS in NDJSON format.
 pub fn print_no_signals_ndjson(info: &ExplainInfo) {
-    let repo_id = compute_repo_id(&info.repo_path);
+    let repo_id = paths::compute_repo_id(&info.repo_path);
 
     // Just meta record, no rank/evidence
     let meta = NdjsonMeta {
@@ -870,7 +836,7 @@ pub fn print_explain_ndjson(info: &ExplainInfo) {
         return;
     }
 
-    let repo_id = compute_repo_id(&info.repo_path);
+    let repo_id = paths::compute_repo_id(&info.repo_path);
 
     // 1. Meta record
     let meta = NdjsonMeta {

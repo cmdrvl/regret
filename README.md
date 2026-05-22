@@ -63,10 +63,11 @@ Enable the commit template that nudges humans and agents into writing these trai
 
 ```bash
 regret --init
-git config commit.template .regret/commit-template.txt
+git config commit.template ~/.cmdrvl/state/regret/repos/<repo-id>/commit-template.txt
 ```
 
 `regret --init` is safe and idempotent. To overwrite existing files, use `--force`.
+The exact repo-scoped path is printed by `regret --init` in `ADOPTION.md`.
 
 Disable (local repo):
 
@@ -77,13 +78,13 @@ git config --unset commit.template
 Optional advisory hook (local repo only):
 
 ```bash
-cp .regret/hooks/commit-msg .git/hooks/commit-msg
+cp ~/.cmdrvl/state/regret/repos/<repo-id>/hooks/commit-msg .git/hooks/commit-msg
 chmod +x .git/hooks/commit-msg
 ```
 
 If you already have a commit-msg hook, merge manually.
 
-Agent instruction snippet (paste into Claude/Codex system prompts; also written by `regret --init` to `.regret/agent-snippets/regret-linked-fix.md`):
+Agent instruction snippet (paste into Claude/Codex system prompts; also written by `regret --init` under `~/.cmdrvl/state/regret/repos/<repo-id>/agent-snippets/`):
 
 ```markdown
 # regret: linked-fix trailers (agent rule)
@@ -127,7 +128,7 @@ NDJSON schema reference: `docs/schema/ndjson/v1.md`
 
 ## Advanced config (optional)
 
-`regret` reads `.regret/config.toml` when present. Defaults:
+`regret` reads `~/.cmdrvl/config/regret/repos/<repo-id>/config.toml` when present. Legacy repo-local `.regret/config.toml` is copied there on first run and left in place with a deprecation notice. Defaults:
 - `ranking.default_since = "30d"`
 - `scan.bootstrap_since = "45d"`
 

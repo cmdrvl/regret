@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -18,6 +17,7 @@ pub struct SnapshotRepo {
     _dir: TempDir,
     pub path: PathBuf,
     pub empty_gitconfig: PathBuf,
+    pub home: PathBuf,
 }
 
 impl SnapshotRepo {
@@ -28,6 +28,11 @@ impl SnapshotRepo {
 
         let empty_gitconfig = dir.path().join("empty_gitconfig");
         fs::write(&empty_gitconfig, "").context("create empty gitconfig")?;
+        let home = dir
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| dir.path().to_path_buf())
+            .join("home");
 
         init_repo(&repo_path, &empty_gitconfig)?;
 
@@ -35,11 +40,12 @@ impl SnapshotRepo {
             _dir: dir,
             path: repo_path,
             empty_gitconfig,
+            home,
         })
     }
 
     pub fn cache_dir(&self) -> PathBuf {
-        self.path.join(".regret")
+        self.home.join(".cmdrvl/cache/regret")
     }
 }
 
@@ -56,12 +62,14 @@ pub fn base_env(empty_gitconfig: &Path) -> Vec<(String, String)> {
 }
 
 pub fn run_regret(repo: &SnapshotRepo, args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("regret"));
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("regret");
     cmd.current_dir(&repo.path);
 
     for (key, value) in base_env(&repo.empty_gitconfig) {
         cmd.env(key, value);
     }
+    cmd.env("HOME", &repo.home);
+    cmd.env_remove("USERPROFILE");
 
     cmd.args(args);
     let output = cmd.output().context("run regret")?;
@@ -75,10 +83,10 @@ pub fn run_regret(repo: &SnapshotRepo, args: &[&str]) -> Result<String> {
 pub fn normalize_output(output: &str, repo: &SnapshotRepo) -> String {
     let mut normalized = output.to_string();
     let repo_path = repo.path.to_string_lossy();
-    let cache_dir = repo.cache_dir();
-    let cache_path = cache_dir.to_string_lossy();
+    let cmdrvl_dir = repo.home.join(".cmdrvl");
+    let cmdrvl_path = cmdrvl_dir.to_string_lossy();
     normalized = normalized.replace(repo_path.as_ref(), "<REPO>");
-    normalized = normalized.replace(cache_path.as_ref(), "<CACHE>");
+    normalized = normalized.replace(cmdrvl_path.as_ref(), "<CMDRVL>");
     normalized = normalized.replace(env!("CARGO_PKG_VERSION"), "<VERSION>");
     normalized
 }

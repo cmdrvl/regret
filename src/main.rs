@@ -13,6 +13,7 @@ mod hotspot;
 mod output;
 mod patch_id;
 mod path_validation;
+mod paths;
 mod policy;
 mod scan;
 mod scan_lock;
@@ -195,6 +196,16 @@ struct WindowInfo {
     until: DateTime<Utc>,
 }
 
+struct RankingOutputContext<'a> {
+    selected: &'a str,
+    new_commits: usize,
+    scan_status: output::ScanStatus,
+    window: &'a WindowInfo,
+    until_info: &'a time_window::UntilInfo,
+    regret_initialized: bool,
+    commit_template_path: String,
+}
+
 fn parse_duration_config(value: &str, field: &str) -> Result<Duration> {
     parse_duration(value).with_context(|| format!("Invalid config duration for {}", field))
 }
@@ -367,29 +378,34 @@ fn parse_args_from(args: &[&str]) -> Result<Config> {
     config_from_matches(&matches)
 }
 
-/// Implement --doctor command: read-only cache diagnostics
-fn run_doctor_command(config: &Config) -> Result<()> {
+/// Implement --doctor command: cache diagnostics
+fn run_doctor_command(config: &Config, paths: &paths::RegretPaths) -> Result<()> {
     use std::fs;
-    use std::path::Path;
 
-    let cache_dir = Path::new(".regret");
+    let cache_dir = &paths.cache_dir;
     let cache_db_path = cache_dir.join("cache.db");
     let cache_wal_path = cache_dir.join("cache.db-wal");
 
     println!("regret doctor");
     println!();
+    println!("Root: {}", paths.cmdrvl_root.display());
+    println!("Config: {}", paths.config_file.display());
+    println!("Cache: {}", cache_dir.display());
+    println!("State: {}", paths.state_dir.display());
+    println!("Lock: {}", paths.lock_file.display());
+    println!();
 
     // Check if cache directory exists
     if !cache_dir.exists() {
         println!("Cache: not found");
-        println!("  No .regret/ directory found");
+        println!("  No canonical regret cache directory found");
         return Ok(());
     }
 
     // Check if database file exists
     if !cache_db_path.exists() {
         println!("Cache: not found");
-        println!("  .regret/ directory exists but no cache.db found");
+        println!("  canonical cache directory exists but no cache.db found");
         return Ok(());
     }
 
@@ -534,23 +550,11 @@ fn print_diagnostic_results(results: &store::DiagnosticResults, config: &Config)
 }
 
 /// Implement --init command: create templates and snippets
-fn run_init_command(force: bool) -> Result<()> {
+fn run_init_command(force: bool, paths: &paths::RegretPaths) -> Result<()> {
     use std::fs;
     use std::path::Path;
 
-    let regret_dir = Path::new(".regret");
-
-    // Ensure .regret directory exists with safe permissions
-    cache_path::ensure_cache_dir(regret_dir)?;
-
-    // Create subdirectories
-    let agent_snippets_dir = regret_dir.join("agent-snippets");
-    let ci_dir = regret_dir.join("ci");
-    let hooks_dir = regret_dir.join("hooks");
-
-    fs::create_dir_all(&agent_snippets_dir)?;
-    fs::create_dir_all(&ci_dir)?;
-    fs::create_dir_all(&hooks_dir)?;
+    paths::ensure_init_dirs(paths)?;
 
     #[derive(Clone, Copy)]
     enum WriteOutcome {
@@ -567,17 +571,32 @@ fn run_init_command(force: bool) -> Result<()> {
             }
             if force {
                 fs::write(path, content)?;
+                harden_written_file(path, false)?;
                 return Ok(WriteOutcome::Overwritten);
             }
             return Ok(WriteOutcome::Skipped);
         }
 
         fs::write(path, content)?;
+        harden_written_file(path, false)?;
         Ok(WriteOutcome::Created)
     }
 
+    #[cfg(unix)]
+    fn harden_written_file(path: &Path, executable: bool) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o700 } else { 0o600 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn harden_written_file(_path: &Path, _executable: bool) -> Result<()> {
+        Ok(())
+    }
+
     let rel_path = |path: &Path| {
-        path.strip_prefix(regret_dir)
+        path.strip_prefix(&paths.state_dir)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string()
@@ -611,18 +630,18 @@ fn run_init_command(force: bool) -> Result<()> {
 # Session-Ref: <session_id>
 "#;
 
-    let commit_template_path = regret_dir.join("commit-template.txt");
     record(
-        write_file(&commit_template_path, commit_template_content, force)?,
-        &commit_template_path,
+        write_file(&paths.commit_template, commit_template_content, force)?,
+        &paths.commit_template,
     );
 
     // 2. ADOPTION.md
-    let adoption_content = r#"# regret adoption
+    let adoption_content = format!(
+        r#"# regret adoption
 
 Enable commit template (local repo):
 
-    git config commit.template .regret/commit-template.txt
+    git config commit.template {commit_template_path}
 
 Disable commit template (local repo):
 
@@ -631,12 +650,13 @@ Disable commit template (local repo):
 Check current setting:
 
     git config --get commit.template
-"#;
+"#,
+        commit_template_path = paths.commit_template.display()
+    );
 
-    let adoption_path = regret_dir.join("ADOPTION.md");
     record(
-        write_file(&adoption_path, adoption_content, force)?,
-        &adoption_path,
+        write_file(&paths.adoption_doc, &adoption_content, force)?,
+        &paths.adoption_doc,
     );
 
     // 3. agent-snippets/regret-linked-fix.md
@@ -649,7 +669,7 @@ When you make a follow-up fix for a previous commit, add a trailer referencing t
 - The SHA MUST be the culprit (the change being fixed), not the evidence/fix commit.
 "#;
 
-    let linked_fix_path = agent_snippets_dir.join("regret-linked-fix.md");
+    let linked_fix_path = paths.agent_snippets_dir.join("regret-linked-fix.md");
     record(
         write_file(&linked_fix_path, linked_fix_content, force)?,
         &linked_fix_path,
@@ -667,7 +687,7 @@ Always include work tracking trailers in your commits to enable conversation-to-
 These trailers enable `cass` and other tools to join commit history back to the conversation that produced it. They do not affect regret scoring—they are context only.
 "#;
 
-    let session_context_path = agent_snippets_dir.join("regret-session-context.md");
+    let session_context_path = paths.agent_snippets_dir.join("regret-session-context.md");
     record(
         write_file(&session_context_path, session_context_content, force)?,
         &session_context_path,
@@ -694,7 +714,7 @@ regret-check:
         regret --ndjson --fail-if "regret_events >= 5 or max_score > 50"
 "#;
 
-    let github_actions_path = ci_dir.join("github-actions-regret.yml");
+    let github_actions_path = paths.ci_dir.join("github-actions-regret.yml");
     record(
         write_file(&github_actions_path, github_actions_content, force)?,
         &github_actions_path,
@@ -717,9 +737,9 @@ fi
 exit 0
 "#;
 
-    let commit_msg_path = hooks_dir.join("commit-msg");
-    let hook_outcome = write_file(&commit_msg_path, commit_msg_hook_content, force)?;
-    record(hook_outcome, &commit_msg_path);
+    let commit_msg_path = &paths.commit_msg_hook;
+    let hook_outcome = write_file(commit_msg_path, commit_msg_hook_content, force)?;
+    record(hook_outcome, commit_msg_path);
 
     // Make the hook executable on Unix (only if written)
     if matches!(
@@ -729,9 +749,9 @@ exit 0
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&commit_msg_path)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&commit_msg_path, perms)?;
+            let mut perms = fs::metadata(commit_msg_path)?.permissions();
+            perms.set_mode(0o700);
+            fs::set_permissions(commit_msg_path, perms)?;
         }
     }
 
@@ -741,19 +761,28 @@ exit 0
     let total_overwritten = overwritten_files.len();
 
     if total_created > 0 && total_skipped == 0 {
-        println!("Initialized .regret/");
+        println!("Initialized {}", paths.state_dir.display());
     } else if total_created > 0 {
         println!(
-            "Initialized .regret/ ({} new, {} existing)",
-            total_created, total_skipped
+            "Initialized {} ({} new, {} existing)",
+            paths.state_dir.display(),
+            total_created,
+            total_skipped
         );
     } else if total_overwritten > 0 {
-        println!("Reinitialized .regret/ ({} overwritten)", total_overwritten);
+        println!(
+            "Reinitialized {} ({} overwritten)",
+            paths.state_dir.display(),
+            total_overwritten
+        );
     } else {
-        println!("Already initialized (.regret/ exists)");
+        println!("Already initialized ({})", paths.state_dir.display());
     }
 
-    println!("\nSee .regret/ADOPTION.md for setup options (commit template, hooks, CI).");
+    println!(
+        "\nSee {} for setup options (commit template, hooks, CI).",
+        paths.adoption_doc.display()
+    );
 
     Ok(())
 }
@@ -777,26 +806,33 @@ fn main() {
 /// Main application logic
 fn run(config: Config) -> Result<()> {
     let mode = resolve_mode(&config);
+    let repo_root = std::env::current_dir()?;
+    let paths = paths::resolve_for_repo(&repo_root);
+    paths::migrate_legacy(&paths)?;
 
     if config.debug {
         eprintln!("Debug: Config = {:?}", config);
         eprintln!("Debug: Resolved Mode = {:?}", mode);
+        eprintln!("Debug: repo_id = {}", paths.repo_id);
+        eprintln!("Debug: cmdrvl_root = {}", paths.cmdrvl_root.display());
+        eprintln!("Debug: config_file = {}", paths.config_file.display());
+        eprintln!("Debug: cache_dir = {}", paths.cache_dir.display());
+        eprintln!("Debug: lock_file = {}", paths.lock_file.display());
     }
 
     // Handle modes that don't need cache
     match &mode {
-        Mode::Init => return run_init_command(config.force),
-        Mode::Doctor => return run_doctor_command(&config),
+        Mode::Init => return run_init_command(config.force, &paths),
+        Mode::Doctor => return run_doctor_command(&config, &paths),
         _ => {}
     }
 
     // All other modes need cache access
-    let mut store = store::Store::open(std::path::Path::new(".regret"))?;
-    let repo_root = std::env::current_dir()?;
+    let mut store = store::Store::open(&paths.cache_dir)?;
     let selected = selected_branch::ensure_selected_branch(&repo_root, &store)?;
     fast_path::ensure_meta_defaults(&store, &selected)?;
     let until_info = time_window::compute_until(&config.until, &repo_root, &selected)?;
-    let file_config = config_file::load_config(&repo_root)?;
+    let file_config = config_file::load_config(&paths.config_file)?;
 
     let default_ranking_since = parse_duration_config(
         file_config
@@ -956,15 +992,16 @@ fn run(config: Config) -> Result<()> {
         }
         Mode::Default => {
             // Default ranking mode: print output (NDJSON or human-readable)
-            run_ranking_output(
-                &config,
-                &store,
-                &selected,
+            let output_context = RankingOutputContext {
+                selected: &selected,
                 new_commits,
                 scan_status,
-                &ranking_window,
-                &until_info,
-            )?;
+                window: &ranking_window,
+                until_info: &until_info,
+                regret_initialized: paths::is_initialized(&paths),
+                commit_template_path: paths::display_path(&paths.commit_template),
+            };
+            run_ranking_output(&config, &store, &output_context)?;
         }
     }
 
@@ -975,11 +1012,7 @@ fn run(config: Config) -> Result<()> {
 fn run_ranking_output(
     config: &Config,
     store: &store::Store,
-    selected: &str,
-    new_commits: usize,
-    scan_status: output::ScanStatus,
-    window: &WindowInfo,
-    until_info: &time_window::UntilInfo,
+    context: &RankingOutputContext<'_>,
 ) -> Result<()> {
     // Get repo info
     let repo_root = std::env::current_dir()?;
@@ -993,10 +1026,10 @@ fn run_ranking_output(
     let coverage_valid = store.get_meta_bool("coverage_valid")?.unwrap_or(false);
     let cache_valid = store.get_meta_bool("cache_valid")?.unwrap_or(false);
 
-    let window_until_utc = window.until.to_rfc3339();
-    let window_since_utc = window.since.map(|since| since.to_rfc3339());
-    let window_days = compute_window_days(window.since, window.until);
-    let window_hint = compute_window_hint(window.since, window.until);
+    let window_until_utc = context.window.until.to_rfc3339();
+    let window_since_utc = context.window.since.map(|since| since.to_rfc3339());
+    let window_days = compute_window_days(context.window.since, context.window.until);
+    let window_hint = compute_window_hint(context.window.since, context.window.until);
 
     let coverage_since = coverage_since_utc
         .as_deref()
@@ -1005,7 +1038,7 @@ fn run_ranking_output(
 
     // Compute coverage days (relative to frozen window end)
     let coverage_days = coverage_since.as_ref().map(|since| {
-        let duration = window.until.signed_duration_since(*since);
+        let duration = context.window.until.signed_duration_since(*since);
         duration.num_days().max(0) as u64
     });
 
@@ -1015,14 +1048,17 @@ fn run_ranking_output(
         store.get_commit_count_in_window(window_since_utc.as_deref(), &window_until_utc)?;
 
     // Get signals for window and aggregate
-    let signals =
-        store.get_signals_for_ranking(selected, window_since_utc.as_deref(), &window_until_utc)?;
+    let signals = store.get_signals_for_ranking(
+        context.selected,
+        window_since_utc.as_deref(),
+        &window_until_utc,
+    )?;
     let min_confidence = config.min_confidence.unwrap_or(0.0);
     let signals: Vec<_> = signals
         .into_iter()
         .filter(|signal| signal.confidence >= min_confidence)
         .collect();
-    let ranked = output::aggregate_culprits(&signals, min_confidence, window.until);
+    let ranked = output::aggregate_culprits(&signals, min_confidence, context.window.until);
 
     // Count events and max score (after confidence/window filtering)
     let events: usize = ranked.iter().map(|c| c.events).sum();
@@ -1050,21 +1086,21 @@ fn run_ranking_output(
 
     // NDJSON output mode
     if config.ndjson {
-        let window_until_source = until_info.source.as_str().to_string();
+        let window_until_source = context.until_info.source.as_str().to_string();
 
         output::print_ndjson(&output::NdjsonInfo {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             repo_path: repo_root,
             repo_basename,
-            selected_branch: selected.to_string(),
+            selected_branch: context.selected.to_string(),
             window_since_utc: window_since_utc.clone(),
             window_until_utc: window_until_utc.clone(),
             window_until_source,
             coverage_since_utc: coverage_since_utc.clone(),
             coverage_valid,
             cache_valid,
-            scan_status,
-            new_commits,
+            scan_status: context.scan_status,
+            new_commits: context.new_commits,
             debug: config.debug,
             events,
             max_score,
@@ -1092,9 +1128,9 @@ fn run_ranking_output(
     let header = output::HeaderInfo {
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
         repo_basename,
-        selected_branch: selected.to_string(),
-        scan_status,
-        new_commits,
+        selected_branch: context.selected.to_string(),
+        scan_status: context.scan_status,
+        new_commits: context.new_commits,
         scanned_commits,
         coverage_days,
     };
@@ -1121,10 +1157,10 @@ fn run_ranking_output(
     });
 
     // Determine coverage status
-    let coverage_complete = if window.since.is_none() {
+    let coverage_complete = if context.window.since.is_none() {
         coverage_since.is_some()
     } else {
-        match (coverage_since.as_ref(), window.since.as_ref()) {
+        match (coverage_since.as_ref(), context.window.since.as_ref()) {
             (Some(since), Some(window_since)) => *since <= *window_since,
             _ => false,
         }
@@ -1151,7 +1187,8 @@ fn run_ranking_output(
 
     // Print NO_EVENTS block (when zero events)
     if events == 0 {
-        let (reverts_detected, linked_fix_detected) = store.get_signal_counts_by_type(selected)?;
+        let (reverts_detected, linked_fix_detected) =
+            store.get_signal_counts_by_type(context.selected)?;
 
         // Determine reason for no events
         let reason = if coverage_status == output::CoverageStatus::Incomplete
@@ -1174,7 +1211,8 @@ fn run_ranking_output(
             window_hint: window_hint.clone(),
             min_confidence,
             reason,
-            regret_initialized: std::path::Path::new(".regret").exists(),
+            regret_initialized: context.regret_initialized,
+            commit_template_path: context.commit_template_path.clone(),
         });
     }
 

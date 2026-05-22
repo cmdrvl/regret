@@ -1,7 +1,7 @@
 //! Configuration file loading and merging.
 //!
 //! Implements TOML config file loading per §4.7:
-//! - Location: <repo_root>/.regret/config.toml
+//! - Location: resolved by src/paths.rs under ~/.cmdrvl/config/regret/
 //! - Override order: defaults → config file → CLI flags
 
 #![allow(dead_code)]
@@ -139,14 +139,12 @@ pub struct SurfacesConfig {
 /// Returns the default configuration if the file doesn't exist.
 /// Warns on unknown keys but continues.
 /// Returns error on invalid values (exit 2).
-pub fn load_config(repo_root: &Path) -> Result<FileConfig> {
-    let config_path = repo_root.join(".regret").join("config.toml");
-
+pub fn load_config(config_path: &Path) -> Result<FileConfig> {
     if !config_path.exists() {
         return Ok(FileConfig::default());
     }
 
-    let content = fs::read_to_string(&config_path)
+    let content = fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
     // Parse TOML with default handling for missing fields
@@ -213,6 +211,12 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
+    fn config_path(temp: &tempfile::TempDir) -> std::path::PathBuf {
+        let config_dir = temp.path().join(".cmdrvl/config/regret/repos/demo");
+        fs::create_dir_all(&config_dir).unwrap();
+        config_dir.join("config.toml")
+    }
+
     #[test]
     fn test_default_config() {
         let config = FileConfig::default();
@@ -225,22 +229,20 @@ mod tests {
     #[test]
     fn test_load_missing_file() {
         let temp = tempdir().unwrap();
-        let config = load_config(temp.path()).unwrap();
+        let config = load_config(&temp.path().join("missing.toml")).unwrap();
         assert_eq!(config.ranking.weights.revert, 10);
     }
 
     #[test]
     fn test_load_partial_config() {
         let temp = tempdir().unwrap();
-        let regret_dir = temp.path().join(".regret");
-        fs::create_dir_all(&regret_dir).unwrap();
 
-        let config_path = regret_dir.join("config.toml");
+        let config_path = config_path(&temp);
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[ranking.weights]").unwrap();
         writeln!(file, "revert = 15").unwrap();
 
-        let config = load_config(temp.path()).unwrap();
+        let config = load_config(&config_path).unwrap();
         assert_eq!(config.ranking.weights.revert, 15);
         assert_eq!(config.ranking.weights.linked_fix, 8); // default
     }
@@ -248,10 +250,8 @@ mod tests {
     #[test]
     fn test_load_full_config() {
         let temp = tempdir().unwrap();
-        let regret_dir = temp.path().join(".regret");
-        fs::create_dir_all(&regret_dir).unwrap();
 
-        let config_path = regret_dir.join("config.toml");
+        let config_path = config_path(&temp);
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[scan]").unwrap();
         writeln!(file, "bootstrap_since = \"60d\"").unwrap();
@@ -278,7 +278,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = load_config(temp.path()).unwrap();
+        let config = load_config(&config_path).unwrap();
         assert_eq!(config.scan.bootstrap_since, Some("60d".to_string()));
         assert_eq!(config.ranking.default_since, Some("14d".to_string()));
         assert_eq!(config.ranking.weights.revert, 20);
@@ -293,15 +293,13 @@ mod tests {
     #[test]
     fn test_invalid_confidence() {
         let temp = tempdir().unwrap();
-        let regret_dir = temp.path().join(".regret");
-        fs::create_dir_all(&regret_dir).unwrap();
 
-        let config_path = regret_dir.join("config.toml");
+        let config_path = config_path(&temp);
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[hotspot]").unwrap();
         writeln!(file, "min_confidence = 1.5").unwrap();
 
-        let result = load_config(temp.path());
+        let result = load_config(&config_path);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -312,15 +310,13 @@ mod tests {
     #[test]
     fn test_invalid_duration() {
         let temp = tempdir().unwrap();
-        let regret_dir = temp.path().join(".regret");
-        fs::create_dir_all(&regret_dir).unwrap();
 
-        let config_path = regret_dir.join("config.toml");
+        let config_path = config_path(&temp);
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[scan]").unwrap();
         writeln!(file, "bootstrap_since = \"invalid\"").unwrap();
 
-        let result = load_config(temp.path());
+        let result = load_config(&config_path);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -331,15 +327,13 @@ mod tests {
     #[test]
     fn test_invalid_weight() {
         let temp = tempdir().unwrap();
-        let regret_dir = temp.path().join(".regret");
-        fs::create_dir_all(&regret_dir).unwrap();
 
-        let config_path = regret_dir.join("config.toml");
+        let config_path = config_path(&temp);
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[ranking.weights]").unwrap();
         writeln!(file, "revert = -5").unwrap();
 
-        let result = load_config(temp.path());
+        let result = load_config(&config_path);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -350,10 +344,8 @@ mod tests {
     #[test]
     fn test_unknown_keys_allowed() {
         let temp = tempdir().unwrap();
-        let regret_dir = temp.path().join(".regret");
-        fs::create_dir_all(&regret_dir).unwrap();
 
-        let config_path = regret_dir.join("config.toml");
+        let config_path = config_path(&temp);
         let mut file = fs::File::create(&config_path).unwrap();
         writeln!(file, "[unknown_section]").unwrap();
         writeln!(file, "unknown_key = 123").unwrap();
@@ -362,7 +354,7 @@ mod tests {
         writeln!(file, "unknown_nested = true").unwrap();
 
         // Should succeed - unknown keys are ignored by serde default
-        let result = load_config(temp.path());
+        let result = load_config(&config_path);
         assert!(result.is_ok());
     }
 }
